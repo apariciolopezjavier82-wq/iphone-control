@@ -155,7 +155,7 @@ impl Daemon {
             None => self.offline(g).await,
             Some(d) => {
                 self.online(g, &d).await;
-                self.adopt_legacy_passcode(g);
+                self.note_legacy_passcodes(g);
             }
         }
 

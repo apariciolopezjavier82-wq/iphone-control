@@ -43,7 +43,7 @@
 **控制接口**：Unix socket（root 默认 `/run/iphone-control/ctl.sock`，普通用户默认 `$XDG_RUNTIME_DIR/iphone-control/ctl.sock`，没有这个变量时（macOS）在数据目录下，权限 0600），JSON 行协议。请求/响应类型和客户端 `call(socket, req, timeout)` 在 `ictl-protocol`，MCP 和 CLI 共用。理由：
 
 - MCP 进程由 `docker exec -i`（从源码运行时直接调用二进制）拉起，短命且可能同时有多个；设备连接（尤其是 HID 需要的显示媒体流、WDA 的 XCTest 会话）只能有一个持有者。
-- 不开 TCP 端口，避免重蹈 `ios forward` 监听所有网卡的覆辙。WDA 本身也通过 idevice 的 provider 直连设备端口，**本机不再监听 8100**。如需给外部工具用，`iphone-control wda-bridge` 显式开启，只绑 127.0.0.1，且只转发 Host 头是 `localhost`/`127.0.0.1`/`[::1]` 的请求（挡住 DNS rebinding）。注意容器用 host 网络，**本机的任何用户都能连上 bridge**，而 WDA 没有认证，用完就停。
+- 不开 TCP 端口，避免重蹈 `ios forward` 监听所有网卡的覆辙。WDA 本身也通过 idevice 的 provider 直连设备端口，**本机不再监听 8100**。如需给外部工具用，`iphone-control wda-bridge` 显式开启，只绑 127.0.0.1，Host 必须是 `localhost`/`127.0.0.1`/`[::1]`，并且要带 0600 令牌文件里的 Bearer 令牌。没有关闭认证的开关。Compose 默认不用宿主机网络。用完就停。
 
 ### 并发模型
 
@@ -125,10 +125,10 @@
 | 路径 | 内容 | 权限 | 进 git / 进镜像 |
 |---|---|---|---|
 | `lockdown/` | 配对记录（容器里的 usbmuxd 读写，即 `/var/lib/lockdown`；用系统的 usbmuxd 服务时不用这里，记录在系统的 `/var/lib/lockdown`；macOS 在 `/var/db/lockdown`，和 Finder 共用） | 0700 | 否 |
-| `account/` | Apple ID 会话、开发私钥、证书 | 0700 | 否 |
+| `account/` | Apple ID 会话、开发私钥、anisette 状态。写入前用内核密钥环的密钥做 AES-256-GCM 封存；解不开时不回退到 `*.legacy-plaintext` | 0700 | 否 |
 | `ddi/` | 开发者镜像缓存（运行时下载的苹果文件）；设了 `ICTL_DDI_DIR` 时用那个目录，不用这里 | 默认 | **否，不得分发** |
 | `wda/` | 当前签好的包 `WDA-signed.ipa`。未签名包在镜像的 `/usr/share/iphone-control/WDA-unsigned.ipa`：构建时下载 Appium 官方的未签名真机包（`WebDriverAgentRunner-Runner.zip` v16.15.3，校验 sha256）重新打包。从源码运行时没有镜像，第一次签名前按同一版本下载、校验，转成 `wda/WDA-unsigned.ipa`（`crates/ictl-daemon/src/wda_pkg.rs`，版本与 Dockerfile 由单测核对）；计划改为本项目 macOS CI 编译。描述文件只嵌在签好的包里，到期时间记在 `state.json` | 默认 | 未签名包进镜像（从源码运行时在本机下载） |
-| `secrets/passcodes/<UDID>` | 各设备的锁屏密码（仅启用自动解锁时）；旧版本的 `secrets/passcode` 在只接着一台时归到那台名下 | 0600 | 否 |
+| `secrets/passcodes/<UDID>`、`secrets/passcode` | 旧版本留下的明文锁屏密码。现在不读取、不改名；只有 `passcode clear` 才删除。新的密码只在守护进程内存里 | 0600（旧文件） | 否 |
 | `logs/` | 日志，按大小轮转；自动解锁停用标记 `UNLOCK-DISABLED`（与 toolkit 一致，便于人工发现；全局，不分设备） | 默认 | 否 |
 | `state.json` | 最近一次签名的 Team ID、WDA Bundle ID、描述文件到期时间；选定的设备；最近一台就绪设备的竖放屏幕尺寸和 UDID；上次重签结果 | 默认 | 否 |
 

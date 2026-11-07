@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### 安全
+
+- anisette 和苹果的 HTTP 客户端改为校验 TLS 证书，失败即拒绝。没有接受无效证书的开关。
+- Apple ID 会话令牌和开发私钥写入 `account/` 前用 AES-256-GCM 封存。密钥在 Linux 内核用户密钥环里，不在文件里。密钥环不可用时，登录拒绝保存，而不是写成明文。0600 不算加密。旧明文会复制为 `*.legacy-plaintext` 留在原地，直到 `iphone-control credentials discard-legacy --yes`。程序不打印这些文件，也不会自己删掉。密文解不开时，不会改去读那份明文副本。
+- 自动解锁不再把锁屏密码存到磁盘。`passcode set` 在守护进程运行时把它放进进程内存，重启后清除。已有的 `secrets/passcode` 和 `secrets/passcodes/<UDID>` 不读取、不改名、不删除，除非运行 `passcode clear`。
+- Apple ID 密码、验证码和锁屏密码在关不掉终端回显时拒绝读取。
+- `wda-bridge` 要求 `Authorization: Bearer`，令牌在 0600 文件里。Host 检查还在。没有不认证的模式。
+- 控制 socket 拒绝既不是守护进程用户、也不是 root 的连接。
+- Compose 默认不再使用宿主机网络，并设置 `no-new-privileges`。只有代理在宿主机 127.0.0.1 上时才需要自行打开 `network_mode: host`。容器仍然是 root，仍然挂载整条 USB 总线。没能挡住的风险见 SECURITY.md。
+
+### 变更
+
+- `passcode set` 需要守护进程已在运行，不会退回到写文件。
+- `iphone-control keyring-check`（以及 `doctor`）会创建、读回并撤销一把临时合成的内核密钥。登录在询问 Apple ID 密码之前、也在任何苹果请求之前做同样的检查。仍然没有明文退路，也没有放宽 seccomp 的开关。
+
 ## [0.1.4] - 2026-11-07
 
 ### 安全

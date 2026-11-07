@@ -1,4 +1,4 @@
-//! 锁屏自动解锁（默认关闭，需显式配置密码文件）。
+//! 锁屏自动解锁（默认关闭）。密码只放在调用方传来的内存里，本模块不读、不写密码文件。
 //!
 //! 规则来自 toolkit 实测，之后按 iOS 26/27 的 iPhone、iPad 真机补充（以下是现行规则）：
 //! 1. 先读 `/wda/locked`，没锁直接返回；WDA 不可用也直接返回（交给后面的调用去报错）
@@ -77,7 +77,8 @@ impl Default for Timing {
 pub const FIRST_DIGIT_ROUNDS: u32 = 3;
 
 pub struct UnlockConfig {
-    pub passcode_file: PathBuf,
+    /// 本次进程内存里的密码。`None` 表示没开自动解锁。不要写入磁盘。
+    pub passcode: Option<String>,
     pub disabled_flag: PathBuf,
     pub timing: Timing,
 }
@@ -91,7 +92,7 @@ pub enum Outcome {
 
 impl UnlockConfig {
     pub fn enabled(&self) -> bool {
-        self.passcode_file.is_file()
+        self.passcode.as_ref().is_some_and(|s| !s.is_empty())
     }
 
     pub fn disabled_by_failure(&self) -> bool {
@@ -140,11 +141,11 @@ fn passcode(cfg: &UnlockConfig) -> Result<String> {
     if cfg.disabled_by_failure() {
         return Err(UnlockError::Disabled);
     }
-    let code = std::fs::read_to_string(&cfg.passcode_file).map_err(|_| UnlockError::NoPasscode)?.trim().to_owned();
-    if code.is_empty() || !code.bytes().all(|b| b.is_ascii_digit()) {
+    let code = cfg.passcode.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or(UnlockError::NoPasscode)?;
+    if !code.bytes().all(|b| b.is_ascii_digit()) {
         return Err(UnlockError::NotDigits);
     }
-    Ok(code)
+    Ok(code.to_owned())
 }
 
 async fn press<T: Transport>(wda: &mut WdaClient<T>, at: (i64, i64), t: &Timing) -> Result<()> {
@@ -367,9 +368,6 @@ mod tests {
     fn cfg(passcode: Option<&str>) -> (UnlockConfig, PathBuf) {
         let dir = std::env::temp_dir().join(format!("ictl-unlock-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        if let Some(p) = passcode {
-            std::fs::write(dir.join("passcode"), p).unwrap();
-        }
         let timing = Timing {
             wake_settle: Duration::ZERO,
             swipe_settle: Duration::ZERO,
@@ -378,7 +376,19 @@ mod tests {
             unlock_confirm: Duration::from_millis(20),
             poll: Duration::from_millis(1),
         };
-        (UnlockConfig { passcode_file: dir.join("passcode"), disabled_flag: dir.join("UNLOCK-DISABLED"), timing }, dir)
+        let passcode = passcode.map(str::trim).filter(|p| !p.is_empty()).map(str::to_owned);
+        (UnlockConfig { passcode, disabled_flag: dir.join("UNLOCK-DISABLED"), timing }, dir)
+    }
+
+    #[tokio::test]
+    async fn disk_file_is_not_used_as_the_passcode() {
+        let fake = FakeLockScreen::new("123456");
+        let (cfg, dir) = cfg(None);
+        std::fs::write(dir.join("passcode"), b"123456").unwrap();
+        let err = ensure_unlocked(&mut WdaClient::new(&fake), &cfg).await.unwrap_err();
+        assert!(matches!(err, UnlockError::NoPasscode), "{err}");
+        assert_eq!(std::fs::read(dir.join("passcode")).unwrap(), b"123456");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

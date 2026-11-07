@@ -38,7 +38,7 @@ const LOCK_WAIT: Duration = Duration::from_secs(3);
 impl Daemon {
     /// 配置了密码就在锁屏时自动解锁；没配置而手机锁着则报错（与 toolkit 一致）
     pub(crate) async fn ensure_unlocked(&self, g: &mut Inner) -> Result<(), String> {
-        let cfg = self.unlock_cfg(g.device.as_ref().map(|d| d.udid.as_str()));
+        let cfg = self.unlock_cfg(g, g.device.as_ref().map(|d| d.udid.as_str()));
         if let Some(left) = g.last_lock.and_then(|t| LOCK_SETTLE.checked_sub(t.elapsed())) {
             tokio::time::sleep(left).await;
         }
@@ -49,9 +49,9 @@ impl Daemon {
                 self.notify(g, Event::UnlockDisabled);
                 Err(format!("{e},已推送通知"))
             }
-            Err(UnlockError::NoPasscode) if self.cfg.legacy_passcode_file().is_file() => {
-                Err("手机已锁屏,需要人工解锁:旧版本保存的锁屏密码没记是哪台设备的,同时接着几台时不会用它;\
-在这台设备连着时运行 iphone-control passcode set 重新设置"
+            Err(UnlockError::NoPasscode) if !self.cfg.plaintext_passcode_paths().is_empty() => {
+                Err("手机已锁屏,需要人工解锁。数据目录里的明文锁屏密码已不再使用(也不会自动删除)。\
+守护进程运行时执行 iphone-control passcode set,密码只留在内存里"
                     .into())
             }
             Err(e) => Err(e.to_string()),
@@ -182,7 +182,7 @@ impl Daemon {
         if let Some(l) = self.devices_line(g) {
             daemon_line = format!("{l}\n{daemon_line}");
         }
-        let unlock = self.unlock_cfg(g.device.as_ref().map(|d| d.udid.as_str()));
+        let unlock = self.unlock_cfg(g, g.device.as_ref().map(|d| d.udid.as_str()));
         let Some(w) = self.wda(g) else {
             return format!("{}\n{NEEDS_WDA}\n{daemon_line}", wda_down(&g.state, g.info.as_ref()));
         };

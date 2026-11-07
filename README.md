@@ -126,16 +126,16 @@ Run them as `docker exec -it iphone-control iphone-control <command>`, or direct
 | `login` | Sign in to the Apple ID again when the session expires |
 | `sign` | Sign and install WebDriverAgent now |
 | `resign [--force]` | Re-sign WebDriverAgent if it expires soon (or now) |
-| `passcode set\|clear` | Turn auto-unlock on or off for a device (passcodes are kept per device) |
+| `passcode set\|clear` | Turn auto-unlock on or off for a device. The passcode stays in the daemon's memory only and is cleared on restart |
 | `unlock-reset` | Turn auto-unlock back on after it was disabled |
 | `devices` / `select <UDID\|name\|auto>` | List connected devices / switch which one is controlled |
 | `notify-test [event]` | Send test notifications |
 | `mcp-config` | Print the command that registers the MCP server |
-| `wda-bridge [--port]` | Expose WebDriverAgent on 127.0.0.1 for other tools; stop it when done |
+| `wda-bridge [--port]` | Expose WebDriverAgent on 127.0.0.1 for other tools. Callers must send the bearer token from the mode-0600 file printed by path only; stop it when done |
 
 All commands and options: [CLI reference](https://derrors.github.io/iphone-control/en/guide/cli).
 
-Upgrade with `git pull && docker compose up -d --build` (or `docker compose pull && docker compose up -d --no-build` for the prebuilt image); for the binary and macOS, see [Source / binary](https://derrors.github.io/iphone-control/en/deploy/source#upgrade) and [macOS](https://derrors.github.io/iphone-control/en/deploy/macos#upgrade). Read the upgrade notes in the [changelog](CHANGELOG.md) first. Settings live in `.env` — see [configuration](https://derrors.github.io/iphone-control/en/guide/configuration). All state lives in `data/`: pairing records, the Apple ID session and signing key, and the passcode if auto-unlock is on. **Back it up; never commit or share it.**
+Upgrade with `git pull && docker compose up -d --build` (or `docker compose pull && docker compose up -d --no-build` for the prebuilt image); for the binary and macOS, see [Source / binary](https://derrors.github.io/iphone-control/en/deploy/source#upgrade) and [macOS](https://derrors.github.io/iphone-control/en/deploy/macos#upgrade). Read the upgrade notes in the [changelog](CHANGELOG.md) first. Settings live in `.env` — see [configuration](https://derrors.github.io/iphone-control/en/guide/configuration). All state lives in `data/`: pairing records and the sealed Apple ID session and signing key. The auto-unlock passcode is not stored there. **Back it up; never commit or share it.** Leftover plaintext files from older versions stay until you delete them.
 
 ## Documentation
 

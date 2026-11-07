@@ -26,6 +26,7 @@ use crate::machine::{Backoff, DeviceState, Misses, MuxWatch};
 use crate::notify::{self, Dedup, Event};
 use crate::protocol::{Request, Response};
 use crate::supervise::StartOutcome;
+use zeroize::Zeroize;
 
 pub const TICK: Duration = Duration::from_secs(10);
 /// 改变手机状态的请求排队超过这么久就放弃
@@ -201,6 +202,9 @@ pub(crate) struct Inner {
     pub next_resign: Instant,
     pub next_session_check: Instant,
     pub apps: HashMap<bool, Vec<AppInfo>>,
+    /// 锁屏密码只活在这个进程里。不写入 state.json，也不写入数据目录。
+    pub passcodes: HashMap<String, String>,
+    legacy_passcode_warned: bool,
 }
 
 pub struct Daemon {
@@ -292,6 +296,8 @@ impl Daemon {
             next_resign: now + Duration::from_secs(60),
             next_session_check: now + Duration::from_secs(90),
             apps: HashMap::new(),
+            passcodes: HashMap::new(),
+            legacy_passcode_warned: false,
         };
         let first = Snapshot {
             state: DeviceState::Absent,
@@ -310,10 +316,10 @@ impl Daemon {
         Arc::new(Self { cfg, log, inner: Mutex::new(inner), snap })
     }
 
-    /// 自动解锁配置：用设备 `udid` 自己的密码。没接设备时密码文件不存在（自动解锁不可用）
-    pub(crate) fn unlock_cfg(&self, udid: Option<&str>) -> UnlockConfig {
+    /// 自动解锁配置：只用本进程内存里的密码。磁盘上的旧文件不读。
+    pub(crate) fn unlock_cfg(&self, g: &Inner, udid: Option<&str>) -> UnlockConfig {
         UnlockConfig {
-            passcode_file: self.cfg.passcode_file_for(udid.unwrap_or("_none")),
+            passcode: udid.and_then(|u| g.passcodes.get(u).cloned()),
             disabled_flag: self.cfg.unlock_disabled_flag(),
             timing: Default::default(),
         }
@@ -337,23 +343,20 @@ impl Daemon {
             .collect()
     }
 
-    /// 旧版本那份不知道是哪台的密码：USB 上只接着一台、正好是要控制的这台、这台还没有自己的密码时，归到它名下。
-    /// 接着多台时不动它（也不用它）
-    pub(crate) fn adopt_legacy_passcode(&self, g: &Inner) {
-        let legacy = self.cfg.legacy_passcode_file();
-        let ([only], Some(d)) = (&g.connected[..], &g.device) else { return };
-        if only.udid != d.udid || !legacy.is_file() {
+    /// 旧的明文密码文件留在原地：不读取、不改名、不删除。只把路径记进日志一次。
+    pub(crate) fn note_legacy_passcodes(&self, g: &mut Inner) {
+        if g.legacy_passcode_warned {
             return;
         }
-        let dst = self.cfg.passcode_file_for(&d.udid);
-        if dst.exists() {
+        let paths = self.cfg.plaintext_passcode_paths();
+        if paths.is_empty() {
             return;
         }
-        let r = self.cfg.ensure_passcodes_dir().and_then(|_| std::fs::rename(&legacy, &dst));
-        match r {
-            Ok(()) => self.log.log(&format!("旧的锁屏密码只有一份，USB 上只接着 {}，归到它名下", d.udid)),
-            Err(e) => tracing::warn!("把旧的锁屏密码归到 {} 名下失败：{e}", d.udid),
-        }
+        g.legacy_passcode_warned = true;
+        let listed = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+        self.log.log(&format!(
+            "发现明文锁屏密码文件，不会读取也不会自动删除：{listed}。自动解锁不再使用磁盘上的密码；确认不需要后运行 iphone-control passcode clear --all"
+        ));
     }
 
     pub(crate) fn notify(&self, g: &mut Inner, e: Event) {
@@ -440,7 +443,7 @@ impl Daemon {
 
     /// 发布快照给不拿锁的读者（`status`）。日志尾巴在读的时候再取
     pub(crate) fn publish(&self, g: &Inner) {
-        let unlock = self.unlock_cfg(g.device.as_ref().map(|d| d.udid.as_str()));
+        let unlock = self.unlock_cfg(g, g.device.as_ref().map(|d| d.udid.as_str()));
         let pinned = self.pinned(g);
         self.snap.send_replace(Snapshot {
             state: g.state.clone(),
@@ -464,8 +467,9 @@ impl Daemon {
         // 不需要设备锁的请求
         match req {
             Request::Daemon => {
+                let g = self.inner.lock().await;
                 let mut s = self.snap.borrow().clone();
-                let unlock = self.unlock_cfg(s.device.as_ref().map(|d| d.udid.as_str()));
+                let unlock = self.unlock_cfg(&g, s.device.as_ref().map(|d| d.udid.as_str()));
                 s.unlock_disabled = unlock.disabled_by_failure();
                 s.auto_unlock = unlock.enabled();
                 s.log_tail = self.log.tail(15);
@@ -544,6 +548,8 @@ impl Daemon {
             }
             Request::ListDevices => Ok(self.list_devices_text(g)),
             Request::SelectDevice { device } => self.select_device(g, &device).await,
+            Request::SetPasscode { udid, passcode } => Ok(self.set_passcode(g, &udid, passcode)),
+            Request::ClearPasscode { udid, all } => self.clear_passcode(g, udid.as_deref(), all),
             Request::Daemon | Request::Resign { .. } => unreachable!("上面已处理"),
         };
         if invalidates {
@@ -551,6 +557,40 @@ impl Daemon {
         }
         self.publish(g);
         r.map(Response::text).unwrap_or_else(Response::error)
+    }
+
+    fn set_passcode(&self, g: &mut Inner, udid: &str, passcode: String) -> String {
+        if let Some(mut old) = g.passcodes.insert(udid.to_owned(), passcode) {
+            old.zeroize();
+        }
+        self.log.log(&format!("已为设备 {udid} 设置内存中的自动解锁密码（不写入磁盘）"));
+        "已把锁屏密码放进守护进程内存，没有写入磁盘。守护进程或容器重启后要重新 passcode set。同一用户和 root 仍能读到进程内存。".into()
+    }
+
+    fn clear_passcode(&self, g: &mut Inner, udid: Option<&str>, all: bool) -> Result<String, String> {
+        if all {
+            for (_, mut code) in g.passcodes.drain() {
+                code.zeroize();
+            }
+        } else if let Some(u) = udid
+            && let Some(mut code) = g.passcodes.remove(u)
+        {
+            code.zeroize();
+        }
+        let removed =
+            self.cfg.delete_plaintext_passcodes(udid, all).map_err(|e| format!("删除明文密码文件失败：{e}"))?;
+        self.log.log("已清除自动解锁密码（内存），并按请求处理明文文件");
+        let mut msg = "已从守护进程内存清掉锁屏密码，自动解锁关闭。".to_owned();
+        if removed.is_empty() {
+            msg.push_str("数据目录里没有要删的明文密码文件。");
+        } else {
+            msg.push_str("已删除这些明文文件（内容未显示）：");
+            for p in &removed {
+                msg.push(' ');
+                msg.push_str(&p.display().to_string());
+            }
+        }
+        Ok(msg)
     }
 
     pub async fn shutdown(&self) {
@@ -572,6 +612,14 @@ fn check_request(req: &Request) -> Result<(), String> {
             return Err(format!("timeout 不能超过 {} 秒", MAX_WAIT_MS / 1000));
         }
         Request::WaitFor { text, .. } if text.is_empty() => return Err("text 不能为空".into()),
+        Request::SetPasscode { udid, passcode } => {
+            if udid.is_empty() || udid.len() > 128 {
+                return Err("udid 无效".into());
+            }
+            if !(4..=32).contains(&passcode.len()) || !passcode.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("只支持 4 到 32 位的纯数字密码".into());
+            }
+        }
         _ => {}
     }
     let seconds = match req {
@@ -703,6 +751,47 @@ mod tests {
         assert!(check_request(&swipe(-1.0)).is_err());
         assert!(check_request(&swipe(f64::NAN)).is_err());
         assert!(check_request(&Request::LongPress { x: 0.0, y: 0.0, seconds: 10.0 }).is_ok());
+    }
+
+    #[tokio::test]
+    async fn passcode_is_memory_only_and_legacy_plaintext_is_left_untouched() {
+        let (d, dir) = test_daemon("pin");
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        let secret = "987654";
+        std::fs::create_dir_all(d.cfg.passcodes_dir()).unwrap();
+        let legacy = d.cfg.legacy_passcode_file();
+        std::fs::write(&legacy, secret).unwrap();
+        let per = d.cfg.passcode_file_for("ABCDEF");
+        std::fs::write(&per, secret).unwrap();
+        let ctx = || CallCtx { gone: None, expect_udid: None };
+        let bad = d
+            .handle(Request::SetPasscode { udid: "ABCDEF".into(), passcode: "12".into() }, Instant::now(), ctx())
+            .await;
+        let Response::Error { message } = &bad else { panic!("{bad:?}") };
+        assert!(!message.contains(secret) && !message.contains("12"), "{message}");
+        let ok = d
+            .handle(Request::SetPasscode { udid: "ABCDEF".into(), passcode: "1234".into() }, Instant::now(), ctx())
+            .await;
+        let Response::Text { text } = &ok else { panic!("{ok:?}") };
+        assert!(!text.contains("1234") && !text.contains(secret), "{text}");
+        assert_eq!(std::fs::read(&legacy).unwrap(), secret.as_bytes());
+        assert_eq!(std::fs::read(&per).unwrap(), secret.as_bytes());
+        {
+            let g = d.inner.lock().await;
+            assert_eq!(g.passcodes.get("ABCDEF").map(String::as_str), Some("1234"));
+            assert!(d.unlock_cfg(&g, Some("ABCDEF")).enabled());
+            assert!(!d.unlock_cfg(&g, Some("OTHER")).enabled());
+        }
+        let cleared = d.handle(Request::ClearPasscode { udid: None, all: true }, Instant::now(), ctx()).await;
+        let Response::Text { text } = &cleared else { panic!("{cleared:?}") };
+        assert!(!text.contains(secret) && !text.contains("1234"), "{text}");
+        assert!(text.contains(&legacy.display().to_string()), "{text}");
+        assert!(!legacy.exists() && !per.exists());
+        let g = d.inner.lock().await;
+        assert!(g.passcodes.is_empty());
+        let log = std::fs::read_to_string(dir.join("logs/daemon.log")).expect("daemon.log");
+        assert!(!log.contains(secret) && !log.contains("1234"), "{log}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

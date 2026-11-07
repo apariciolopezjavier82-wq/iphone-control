@@ -1963,6 +1963,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2004,12 +2005,20 @@ dependencies = [
 name = "ictl-sign"
 version = "0.1.4"
 dependencies = [
+ "libc",
+ "omnisette",
  "plist",
  "plume_core",
  "plume_store",
+ "rcgen",
+ "reqwest 0.13.5",
+ "ring",
+ "rustls",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "uuid",
+ "zeroize",
  "zip",
 ]
 

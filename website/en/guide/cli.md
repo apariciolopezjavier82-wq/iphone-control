@@ -50,9 +50,9 @@ See [Auto-unlock](./auto-unlock). `--device` takes a UDID or name, and the devic
 
 | Command | What it does |
 |---|---|
-| `passcode set [--device <device>]` | Save this device's passcode and turn auto-unlock on |
-| `passcode clear [--device <device>]` | Delete this device's passcode |
-| `passcode clear --all` | Delete every device's passcode |
+| `passcode set [--device <device>]` | Keep this device's passcode in the daemon's memory and turn auto-unlock on. The daemon must be running; nothing is written to disk |
+| `passcode clear [--device <device>]` | Forget this device's in-memory passcode and delete that device's old plaintext file, if one exists |
+| `passcode clear --all` | Forget every in-memory passcode and delete old plaintext passcode files |
 | `unlock-reset` | Turn auto-unlock back on after it was disabled. It doesn't check the passcode, so make sure it's right first |
 
 ## Other
@@ -60,7 +60,9 @@ See [Auto-unlock](./auto-unlock). `--device` takes a UDID or name, and the devic
 | Command | What it does |
 |---|---|
 | `notify-test [event]` | Send test notifications: one per event type, or one type (`resign`, `session`, `pin`, `pin-recovered`, `unlock`, `offline`, `online`) |
-| `wda-bridge [--port <port>]` | Expose WDA on `127.0.0.1` (default port 8100) for other tools. WDA has no authentication and every local user can reach it, so stop it when done |
+| `wda-bridge [--port <port>]` | Expose WDA on `127.0.0.1` (default port 8100). Send `Authorization: Bearer` with the token from the mode-0600 file (the command prints the path, not the token). Stop it when done |
+| `credentials discard-legacy [--yes]` | List leftover plaintext credential copies. `--yes` deletes only `*.legacy-plaintext` files and does not print their contents |
+| `keyring-check` | Create, read, and revoke an ephemeral synthetic kernel key. No Apple login, USB, or stored secret. Exits non-zero if sealing cannot work |
 
 The `debug` subcommand for diagnostics isn't compiled by default; see the [contributing guide](https://github.com/Derrors/iphone-control/blob/main/CONTRIBUTING.md#testing-on-a-real-phone).
 

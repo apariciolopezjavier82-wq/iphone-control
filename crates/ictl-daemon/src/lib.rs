@@ -35,9 +35,13 @@ const MAX_REQUEST_LINE: u64 = 1024 * 1024;
 /// 运行守护进程直到收到 SIGTERM / SIGINT
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.prepare_dirs()?;
+    // 新文件默认 0600/0700。plume 写开发私钥时不改权限，umask 先挡住 0644。
+    protocol::tighten_umask();
     let socket = cfg.socket.clone();
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     // 已有守护进程在用这个 socket 就退出：两个守护进程会争 usbmuxd、WDA 和 HID
     if tokio::net::UnixStream::connect(&socket).await.is_ok() {
@@ -73,7 +77,14 @@ async fn serve(cfg: Config, listener: tokio::net::UnixListener) -> anyhow::Resul
             _ = tokio::signal::ctrl_c() => break,
             r = listener.accept() => match r {
                 Ok((stream, _)) => {
-                    conns.spawn_local(serve_conn(daemon.clone(), stream));
+                    let daemon_uid = protocol::current_euid();
+                    match stream.peer_cred() {
+                        Ok(cred) if protocol::control_peer_allowed(cred.uid(), daemon_uid) => {
+                            conns.spawn_local(serve_conn(daemon.clone(), stream));
+                        }
+                        Ok(cred) => tracing::warn!("拒绝控制连接：对方 uid {} 不是本进程用户", cred.uid()),
+                        Err(e) => tracing::warn!("拒绝控制连接：读不到对方 uid：{e}"),
+                    }
                 }
                 Err(e) => tracing::warn!("控制接口 accept 失败：{e}"),
             },
@@ -134,7 +145,8 @@ async fn serve_conn(daemon: Arc<Daemon>, stream: tokio::net::UnixStream) {
                     }
                     resp
                 }
-                Err(e) => protocol::Response::error(format!("请求格式错误：{e}")),
+                // 不把 serde 的输入片段放进错误：请求行里可能有锁屏密码
+                Err(_) => protocol::Response::error("请求格式错误"),
             }
         };
         let mut out = serde_json::to_string(&resp).unwrap_or_default();

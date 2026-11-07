@@ -81,10 +81,9 @@ pub enum Error {
 
 pub fn client() -> Result<reqwest::Client, Error> {
     const APPLE_ROOT: &[u8] = include_bytes!("./apple_root.der");
+    // Certificate validation stays on. The Apple root is an additional trust anchor, not a bypass.
     let client = reqwest::ClientBuilder::new()
         .add_root_certificate(reqwest::Certificate::from_der(APPLE_ROOT)?)
-        // uncomment when debugging w/ charles proxy
-        // .danger_accept_invalid_certs(true)
         .http1_title_case_headers()
         .connection_verbose(true)
         .build()?;

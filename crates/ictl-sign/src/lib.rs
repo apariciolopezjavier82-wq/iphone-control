@@ -5,11 +5,15 @@
 //! 签名流程本身在这里重写，修掉了 Impactor 漏签 `.xctest` 的问题（见 [`bundle`]）。
 //!
 //! 账号目录（数据目录下 `account/`，0700）：`accounts.json`（会话令牌）、`keys/<团队>/key.pem`（开发私钥）、anisette 状态。
+//! 这些文件在写入前用内核密钥环里的密钥做 AES-256-GCM 封存。0600 只是权限，不是加密。
 //! 免费账号：描述文件 7 天过期、开发证书 1 年。
 
 pub mod bundle;
 pub mod ipa;
 pub mod profile;
+mod secrets;
+
+pub use secrets::{KeyringCheck, LegacyDiscard, credential_warnings, discard_legacy_plaintext, keyring_preflight};
 
 use std::path::{Path, PathBuf};
 
@@ -38,6 +42,8 @@ pub enum SignError {
     Verify(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Secrets(String),
 }
 
 impl From<plume_core::Error> for SignError {
@@ -63,12 +69,8 @@ pub struct AccountDir {
 }
 
 impl AccountDir {
-    fn store_path(&self) -> PathBuf {
-        self.dir.join("accounts.json")
-    }
-
-    fn anisette(&self) -> AnisetteConfiguration {
-        let c = AnisetteConfiguration::default().set_configuration_path(self.dir.clone());
+    fn anisette_at(&self, path: &Path) -> AnisetteConfiguration {
+        let c = AnisetteConfiguration::default().set_configuration_path(path.to_owned());
         // 启用的是 v3 provider，它只看 v3 地址；原来设的是用不到的 v1 地址，自建服务不生效
         match &self.anisette_url {
             Some(url) => c.set_anisette_url_v3(url.clone()),
@@ -76,45 +78,57 @@ impl AccountDir {
         }
     }
 
-    /// 交互式登录。`two_factor` 在需要验证码时被调用（可在里面读终端输入）。成功后会话写入 `accounts.json`。
+    /// 交互式登录。`two_factor` 在需要验证码时被调用（可在里面读终端输入）。
+    /// 成功后会话封存进 `accounts.json`（不是明文）。密钥环不可用时直接失败，不把令牌写成明文。
     pub async fn login(
         &self,
         email: &str,
         password: &str,
         two_factor: impl Fn(TwoFactorRequest) -> std::result::Result<TwoFactorAction, String>,
     ) -> Result<String> {
+        // 先探测密钥环，再读账号目录，再调用苹果。探测失败不会发出登录请求，也不写明文。
+        secrets::keyring_preflight().require_for_apple_login().map_err(SignError::Secrets)?;
         restrict_dir(&self.dir)?;
+        let view = secrets::RuntimeAccount::open(&self.dir)?;
+        view.ensure_key()?;
         let (e, p) = (email.to_owned(), password.to_owned());
-        let account = PlumeAccount::login(move || Ok((e.clone(), p.clone())), two_factor, self.anisette()).await?;
-        let mut store =
-            AccountStore::load(&Some(self.store_path())).await.map_err(|e| SignError::Developer(e.to_string()))?;
+        let account =
+            PlumeAccount::login(move || Ok((e.clone(), p.clone())), two_factor, self.anisette_at(view.root())).await?;
+        let mut store = AccountStore::load(&Some(view.root().join("accounts.json")))
+            .await
+            .map_err(|e| SignError::Developer(e.to_string()))?;
         store
             .accounts_add_from_session(email.to_owned(), account)
             .await
             .map_err(|e| SignError::Developer(e.to_string()))?;
+        view.persist()?;
         Ok(email.to_owned())
     }
 
     /// 当前选中账号的邮箱
     pub async fn selected_email(&self) -> Result<String> {
-        let store =
-            AccountStore::load(&Some(self.store_path())).await.map_err(|e| SignError::Developer(e.to_string()))?;
+        let view = secrets::RuntimeAccount::open(&self.dir)?;
+        let store = AccountStore::load(&Some(view.root().join("accounts.json")))
+            .await
+            .map_err(|e| SignError::Developer(e.to_string()))?;
         store.selected_account().map(|a| a.email().clone()).ok_or(SignError::NotLoggedIn)
     }
 
     /// 用保存的令牌恢复会话，取第一个团队
     pub async fn session(&self) -> Result<Session> {
         restrict_dir(&self.dir)?;
-        restrict_tree(&self.dir)?;
-        let store =
-            AccountStore::load(&Some(self.store_path())).await.map_err(|e| SignError::Developer(e.to_string()))?;
-        let acct = store.selected_account().ok_or(SignError::NotLoggedIn)?.clone();
-        let inner = DeveloperSession::new(acct.adsid().clone(), acct.xcode_gs_token().clone(), self.anisette())
+        let view = secrets::RuntimeAccount::open(&self.dir)?;
+        let store = AccountStore::load(&Some(view.root().join("accounts.json")))
             .await
-            .map_err(|e| SignError::SessionInvalid(e.to_string()))?;
+            .map_err(|e| SignError::Developer(e.to_string()))?;
+        let acct = store.selected_account().ok_or(SignError::NotLoggedIn)?.clone();
+        let inner =
+            DeveloperSession::new(acct.adsid().clone(), acct.xcode_gs_token().clone(), self.anisette_at(view.root()))
+                .await
+                .map_err(|e| SignError::SessionInvalid(e.to_string()))?;
         let teams = inner.qh_list_teams().await.map_err(|e| SignError::SessionInvalid(e.to_string()))?.teams;
         let team_id = teams.first().map(|t| t.team_id.clone()).ok_or(SignError::NoTeam)?;
-        Ok(Session { inner, team_id, dir: self.clone() })
+        Ok(Session { inner, team_id, view })
     }
 }
 
@@ -122,7 +136,7 @@ impl AccountDir {
 pub struct Session {
     inner: DeveloperSession,
     pub team_id: String,
-    dir: AccountDir,
+    view: secrets::RuntimeAccount,
 }
 
 /// 一次签名的结果
@@ -159,8 +173,10 @@ impl Session {
 
         // 证书必须在申请描述文件之前定下来：本地没有私钥时这里会吊销旧证书、新建一张，
         // 而描述文件只包含生成那一刻团队里有效的证书，先拿描述文件会装不上（0xe8008015）
+        self.view.ensure_key()?;
         let cert =
-            CertificateIdentity::new_with_session(&self.inner, self.dir.dir.clone(), None, team, false, None).await?;
+            CertificateIdentity::new_with_session(&self.inner, self.view.root().to_owned(), None, team, false, None)
+                .await?;
 
         // 只有带 entitlements 的 bundle（App/扩展）需要换 ID 并申请描述文件；WDA 里只有主程序一个
         let mut profiles = Vec::new();
@@ -201,8 +217,9 @@ impl Session {
         if let Some(key) = &cert.key {
             key.finish()?;
         }
-        // 证书新建时 plume 按默认 umask 写私钥（0644），收紧
-        restrict_tree(&self.dir.dir)?;
+        // 私钥先出现在 tmpfs 里，再封存进数据目录。封存失败就不留下明文副本。
+        self.view.persist()?;
+        restrict_tree(self.view.root())?;
 
         let profile = verify_signed(&app, udid, cert.cert.as_ref().map(|c| c.constructed_data()))?;
         ipa::pack(work, output)?;
@@ -262,14 +279,15 @@ fn restrict_tree(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     /// 自建 anisette 服务地址要落到 v3 provider 实际读的字段上（原来设到 v1 字段，不生效）
     #[test]
     fn custom_anisette_url_reaches_v3_provider() {
         let dir = AccountDir { dir: PathBuf::from("/tmp/x"), anisette_url: Some("https://ani.example.com".into()) };
-        assert_eq!(dir.anisette().anisette_url_v3(), "https://ani.example.com");
+        assert_eq!(dir.anisette_at(Path::new("/tmp/x")).anisette_url_v3(), "https://ani.example.com");
         let default = AccountDir { dir: PathBuf::from("/tmp/x"), anisette_url: None };
-        assert_eq!(default.anisette().anisette_url_v3(), "https://mac-ani.jkcoxson.com");
+        assert_eq!(default.anisette_at(Path::new("/tmp/x")).anisette_url_v3(), "https://mac-ani.jkcoxson.com");
     }
     use std::time::{Duration, SystemTime};
 

@@ -10,7 +10,7 @@ use chrono::{DateTime, SubsecRound, Utc};
 use futures_util::{SinkExt, stream::StreamExt};
 use log::debug;
 use plist::{Data, Dictionary};
-use reqwest::{Client, ClientBuilder, RequestBuilder};
+use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -178,10 +178,8 @@ impl AnisetteData {
 }
 
 fn make_reqwest() -> Result<Client, AnisetteError> {
-    Ok(ClientBuilder::new()
-        .http1_title_case_headers()
-        .danger_accept_invalid_certs(true) // TODO: pin the apple certificate
-        .build()?)
+    // Same policy as [`crate::validated_http_client`]: certificate validation stays on.
+    Ok(crate::validated_http_client()?)
 }
 
 impl AnisetteClient {
@@ -320,6 +318,8 @@ impl AnisetteClient {
 
         let provision_ws_url =
             format!("{}/v3/provisioning_session", self.url).replace("https://", "wss://");
+        // `connect_async` uses rustls with webpki roots (crate feature rustls-tls-webpki-roots)
+        // and rejects untrusted certificates. Do not switch it to a connector that skips verification.
         let (mut connection, _) = connect_async(&provision_ws_url).await?;
 
         #[derive(Deserialize)]
@@ -533,6 +533,8 @@ mod tests {
     use crate::{AnisetteError, DEFAULT_ANISETTE_URL_V3};
     use log::info;
 
+    /// Contacts a live anisette server and, during provisioning, Apple. Not part of default test runs.
+    #[ignore = "live anisette server and Apple; do not run in CI or without explicit intent"]
     #[tokio::test]
     async fn fetch_anisette_remote_v3() -> Result<(), AnisetteError> {
         crate::tests::init_logger();

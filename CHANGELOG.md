@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Security
+
+- Anisette and Apple HTTP clients validate TLS certificates and fail closed. There is no option to accept invalid certificates.
+- Apple ID session tokens and development keys are sealed with AES-256-GCM before they are written under `account/`. The key lives in the Linux kernel user keyring, not on disk. If that keyring cannot be used, login refuses to store them. Mode 0600 is not treated as encryption. Older plaintext files are copied to `*.legacy-plaintext` and left there until `iphone-control credentials discard-legacy --yes`. They are not printed and not deleted on their own. A sealed file that cannot be opened is not replaced by that leftover plaintext.
+- Auto-unlock no longer stores the passcode on disk. `passcode set` sends it to the running daemon and keeps it in process memory only; a restart clears it. Existing `secrets/passcode` and `secrets/passcodes/<UDID>` files are not read, renamed, or deleted unless you run `passcode clear`.
+- The Apple ID password, verification code, and passcode prompts refuse to read input when terminal echo cannot be turned off.
+- `wda-bridge` requires `Authorization: Bearer` with a token from a mode-0600 file. The Host check remains. There is no unauthenticated mode.
+- The control socket rejects peers that are neither the daemon's user nor root.
+- Compose no longer uses host networking by default, and sets `no-new-privileges`. Opt into `network_mode: host` only when a proxy on the host loopback has to be reached. The container is still root and still mounts the USB bus. See SECURITY.md for what this does not fix.
+
+### Changed
+
+- `passcode set` requires the daemon to be running. It does not fall back to a file.
+- `iphone-control keyring-check` (and `doctor`) creates, reads, and revokes an ephemeral synthetic kernel key. Login runs that check before prompting for the Apple ID password and before any Apple request. There is still no plaintext fallback and no seccomp bypass.
+
 ## [0.1.4] - 2026-11-07
 
 ### Security

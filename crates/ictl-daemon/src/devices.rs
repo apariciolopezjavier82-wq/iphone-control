@@ -64,7 +64,8 @@ impl Daemon {
         let mut lines = vec![format!("接着 {} 台,{mode}:", infos.len())];
         for i in &infos {
             let mark = if Some(i.udid.as_str()) == current { "→ 正在控制 " } else { "  " };
-            let pin = if self.cfg.passcode_file_for(&i.udid).is_file() { "已设" } else { "没设" };
+            let pin =
+                if g.passcodes.contains_key(&i.udid) { "已设(仅本进程内存,重启失效)" } else { "没设" };
             lines.push(format!("{mark}{} 自动解锁密码{pin}", device_label(i)));
         }
         if self.cfg.udid.is_none() && infos.len() > 1 {
@@ -114,10 +115,10 @@ impl Daemon {
         // 上一台的锁屏时间不能拿来等这一台
         g.last_lock = None;
         self.online(g, &usb).await;
-        let pin = if self.cfg.passcode_file_for(&target.udid).is_file() {
+        let pin = if g.passcodes.contains_key(&target.udid) {
             ""
         } else {
-            ";这台没设自动解锁密码,锁屏时要人工解锁(在这台连着时运行 iphone-control passcode set)"
+            ";这台没设自动解锁密码,锁屏时要人工解锁(守护进程运行时 iphone-control passcode set,密码只留在内存里)"
         };
         Ok(format!(
             "已切换到 {label},之后固定控制这台。状态:{};WDA 起来要 10~60 秒,先用 iphone_status 确认就绪{pin}",
