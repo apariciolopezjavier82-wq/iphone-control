@@ -15,7 +15,7 @@
 位置：Docker 部署是仓库目录下的 `./data`（root 所有，权限 0700）；从源码运行是 `~/.local/share/iphone-control`，配对记录在系统的 `/var/lib/lockdown`；macOS 上数据目录也是 `~/.local/share/iphone-control`，配对记录由系统保存在 `/var/db/lockdown`（和 Finder 共用）。
 
 ::: danger 这些是秘密
-数据目录能用来登录你的 Apple ID 开发者账号、免确认地连接手机，开启自动解锁时还有明文锁屏密码。不要提交到 git，不要发给别人，备份也要加密保存。
+数据目录里的配对记录仍然可以不经再次「信任」就连接手机。新保存的 Apple ID 会话是封存的，没有那一次启动的内核密钥环密钥就解不开。旧的明文副本（`*.legacy-plaintext`、`secrets/passcode*`）不会被自动删除，里面仍有秘密。不要提交到 git，不要发给别人，备份也要加密保存。锁屏密码不再写在这里。
 :::
 
 ## 备份

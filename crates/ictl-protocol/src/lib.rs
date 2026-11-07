@@ -123,6 +123,32 @@ pub enum Request {
     SelectDevice {
         device: String,
     },
+    /// 把这台设备的锁屏密码放进守护进程内存。不写磁盘，重启后失效。
+    SetPasscode {
+        udid: String,
+        passcode: String,
+    },
+    /// 清掉内存中的密码，并删除数据目录里调用方点名的明文密码文件。
+    ClearPasscode {
+        udid: Option<String>,
+        #[serde(default)]
+        all: bool,
+    },
+}
+
+/// 控制接口只接受守护进程自己的用户，以及 root（容器里 `docker exec`、排障）。
+/// 其他本机用户即使碰到了权限过宽的 socket 也进不来。
+pub fn control_peer_allowed(peer_uid: u32, daemon_euid: u32) -> bool {
+    peer_uid == daemon_euid || peer_uid == 0
+}
+
+pub fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+/// 本进程之后创建的文件默认只有所有者能读写。已有文件的权限不变。
+pub fn tighten_umask() {
+    unsafe { libc::umask(0o077) };
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -243,6 +269,16 @@ mod tests {
         assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), r);
         let e: Response = serde_json::from_str(r#"{"kind":"error","message":"x"}"#).unwrap();
         assert_eq!(e, Response::error("x"));
+        let set = Request::SetPasscode { udid: "UDID".into(), passcode: "0000".into() };
+        let s = serde_json::to_string(&set).unwrap();
+        assert_eq!(serde_json::from_str::<Request>(&s).unwrap(), set);
+    }
+
+    #[test]
+    fn control_socket_rejects_other_users() {
+        assert!(control_peer_allowed(1000, 1000));
+        assert!(control_peer_allowed(0, 1000));
+        assert!(!control_peer_allowed(1001, 1000));
     }
 
     /// 旧版本守护进程直接反序列化请求：多出来的 cancel_on_close 键不能让它报错（含没有字段的请求）

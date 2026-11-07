@@ -61,6 +61,26 @@ pub const DEFAULT_ANISETTE_URL: &str = "https://ani.f1sh.me/";
 
 pub const DEFAULT_ANISETTE_URL_V3: &str = "https://mac-ani.jkcoxson.com";
 
+/// HTTP client that validates TLS certificates.
+///
+/// Untrusted, mismatched, expired, and self-signed certificates fail the handshake.
+/// There is no setting to turn validation off. The Apple root is an extra trust anchor
+/// for `gsa.apple.com`; it does not replace the default roots and it does not skip checks.
+pub fn validated_http_client_builder() -> reqwest::ClientBuilder {
+    let mut builder = reqwest::ClientBuilder::new().http1_title_case_headers();
+    match reqwest::Certificate::from_der(include_bytes!("../../plume_core/src/apple_root.der")) {
+        Ok(cert) => {
+            builder = builder.add_root_certificate(cert);
+        }
+        Err(e) => log::warn!("Apple root was not added; default certificate validation stays on: {e}"),
+    }
+    builder
+}
+
+pub fn validated_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    validated_http_client_builder().build()
+}
+
 #[derive(Clone, Debug)]
 pub struct AnisetteConfiguration {
     anisette_url: String,

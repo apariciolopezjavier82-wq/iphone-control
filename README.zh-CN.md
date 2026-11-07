@@ -126,16 +126,16 @@ iphone-control mcp-config   # 打印 `claude mcp add` 命令，复制运行
 | `login` | Apple ID 会话失效时重新登录 |
 | `sign` | 立即签名并安装 WebDriverAgent |
 | `resign [--force]` | 快过期才重签 WebDriverAgent（或立即重签） |
-| `passcode set\|clear` | 开启或关闭一台设备的自动解锁（密码按设备分开存） |
+| `passcode set\|clear` | 开启或关闭一台设备的自动解锁。密码只留在守护进程内存里，重启后清除 |
 | `unlock-reset` | 自动解锁被停用后恢复 |
 | `devices` / `select <UDID\|设备名\|auto>` | 列出接着的设备 / 切换控制哪一台 |
 | `notify-test [事件]` | 发送测试通知 |
 | `mcp-config` | 打印注册 MCP 的命令 |
-| `wda-bridge [--port]` | 把 WebDriverAgent 桥接到 127.0.0.1 给别的工具用，用完就停 |
+| `wda-bridge [--port]` | 把 WebDriverAgent 桥接到 127.0.0.1。调用方要带 0600 令牌文件里的 Bearer 令牌（程序只打印路径），用完就停 |
 
 全部命令和参数见[命令行](https://derrors.github.io/iphone-control/guide/cli)。
 
-升级：`git pull && docker compose up -d --build`（用预构建镜像时改为 `docker compose pull && docker compose up -d --no-build`）；二进制和 macOS 见[从源码 / 二进制](https://derrors.github.io/iphone-control/deploy/source#升级)、[macOS](https://derrors.github.io/iphone-control/deploy/macos#升级)。升级前先看[更新日志](CHANGELOG.zh-CN.md)里的升级注意事项。配置写在 `.env`，见[配置说明](https://derrors.github.io/iphone-control/guide/configuration)。所有状态都在 `data/`：配对记录、Apple ID 会话和签名私钥，开启自动解锁时还有锁屏密码。**要备份，不要提交或分享。**
+升级：`git pull && docker compose up -d --build`（用预构建镜像时改为 `docker compose pull && docker compose up -d --no-build`）；二进制和 macOS 见[从源码 / 二进制](https://derrors.github.io/iphone-control/deploy/source#升级)、[macOS](https://derrors.github.io/iphone-control/deploy/macos#升级)。升级前先看[更新日志](CHANGELOG.zh-CN.md)里的升级注意事项。配置写在 `.env`，见[配置说明](https://derrors.github.io/iphone-control/guide/configuration)。所有状态都在 `data/`：配对记录，以及封存后的 Apple ID 会话和签名私钥。自动解锁的锁屏密码不在这里。**要备份，不要提交或分享。** 旧版本留下的明文文件会一直留到你自己删除。
 
 ## 文档
 

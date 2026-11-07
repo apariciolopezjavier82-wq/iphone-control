@@ -20,7 +20,10 @@ services:
       - "c 189:* rmw"
     init: true
     stop_grace_period: 30s
-    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    # 默认用独立网络。只有代理在宿主机 127.0.0.1 上时才取消下面这行的注释：
+    # network_mode: host
     restart: unless-stopped
     environment:
       # 以下都可选，按需取消注释，完整列表见「配置」
@@ -71,7 +74,7 @@ docker compose pull && docker compose up -d --no-build
 ## compose 做了什么
 
 - 只开放 USB 字符设备（`device_cgroup_rules: "c 189:* rmw"`），`/dev/bus/usb` 绑定挂载，拔插后新的设备节点在容器里也看得到。
-- `network_mode: host`：只为了能用宿主机上的代理；本身不监听任何端口。
+- 默认使用 Compose 的独立网络，并设置 `no-new-privileges`。只有代理在宿主机回环地址上时才打开 `network_mode: host`。容器仍然是 root，仍然绑定整条 USB 总线。
 - `./data` 挂到容器的 `/var/lib/iphone-control`，删掉重建容器也不丢配对和登录。
 - `init: true`、`stop_grace_period: 30s`：停止时先关掉手机上的会话，避免留下「配对的电脑」图标。
 

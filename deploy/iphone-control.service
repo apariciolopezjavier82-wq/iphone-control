@@ -19,6 +19,13 @@ Restart=on-failure
 RestartSec=10
 # 停止时先停 HID 屏幕媒体流和 runner，给够时间，避免手机端留下会话
 TimeoutStopSec=30
+# 最小权限里不挡 usbmuxd 套接字和 USB 设备节点的部分。ProtectSystem=strict 会把
+# 整个文件系统收成只读，连系统 usbmuxd 套接字都可能写不进去，这里不用。
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=default.target

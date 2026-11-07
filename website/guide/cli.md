@@ -50,9 +50,9 @@
 
 | 命令 | 作用 |
 |---|---|
-| `passcode set [--device <设备>]` | 保存这台设备的锁屏密码，开启自动解锁 |
-| `passcode clear [--device <设备>]` | 删除这台设备的密码 |
-| `passcode clear --all` | 删除所有设备的密码 |
+| `passcode set [--device <设备>]` | 把这台设备的锁屏密码放进守护进程内存并开启自动解锁。守护进程必须在运行，不写入磁盘 |
+| `passcode clear [--device <设备>]` | 忘掉这台设备内存里的密码，并删除它的旧明文文件（如果有） |
+| `passcode clear --all` | 忘掉全部内存中的密码，并删除旧的明文密码文件 |
 | `unlock-reset` | 自动解锁被停用后恢复。它不核对密码，先自己确认密码没错 |
 
 ## 其他
@@ -60,7 +60,8 @@
 | 命令 | 作用 |
 |---|---|
 | `notify-test [事件]` | 发测试通知：每类事件各一条，或只发一类（`resign`、`session`、`pin`、`pin-recovered`、`unlock`、`offline`、`online`） |
-| `wda-bridge [--port <端口>]` | 把 WDA 桥接到 `127.0.0.1`，端口默认 8100，给别的工具用。WDA 没有认证，本机任何用户都能连上，用完就停 |
+| `wda-bridge [--port <端口>]` | 把 WDA 桥接到 `127.0.0.1`，端口默认 8100。请求要带 0600 令牌文件里的 Bearer 令牌（命令只打印路径）。用完就停 |
+| `credentials discard-legacy [--yes]` | 列出封存前留下的明文副本。`--yes` 只删除 `*.legacy-plaintext`，不打印内容 |
 
 调试用的 `debug` 子命令默认不编译，见[贡献指南](https://github.com/Derrors/iphone-control/blob/main/CONTRIBUTING.md#testing-on-a-real-phone)。
 

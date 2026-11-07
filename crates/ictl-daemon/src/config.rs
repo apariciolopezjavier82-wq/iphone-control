@@ -1,4 +1,5 @@
-//! 守护进程配置：全部来自环境变量（容器里由 .env 注入；从源码运行时由 systemd 的环境文件或 shell 给），都有默认值。秘密只放文件，不放环境变量以外的地方。
+//! 守护进程配置：全部来自环境变量（容器里由 .env 注入；从源码运行时由 systemd 的环境文件或 shell 给），都有默认值。
+//! 锁屏密码不放这里，也不写入数据目录。通知密钥仍在环境变量里，谁能读进程环境谁就能看到。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -115,8 +116,8 @@ impl Config {
     pub fn ddi_cache(&self) -> PathBuf {
         self.data_dir.join("ddi")
     }
-    /// 旧版本的锁屏密码：只有一份，不知道是哪台设备的。USB 上只接着一台时归到那台名下（见
-    /// [`crate::core::Daemon::adopt_legacy_passcode`]），接着多台时不用，免得把一台的密码输进另一台
+    /// 旧版本的锁屏密码：只有一份，不知道是哪台设备的。现在不再读取、不再改名。
+    /// 只有用户明确执行 `passcode clear` 时才删除。
     pub fn legacy_passcode_file(&self) -> PathBuf {
         self.data_dir.join("secrets/passcode")
     }
@@ -135,6 +136,41 @@ impl Config {
     pub fn passcode_file_for(&self, udid: &str) -> PathBuf {
         let name: String = udid.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
         self.passcodes_dir().join(name)
+    }
+
+    /// 数据目录里的明文锁屏密码文件（只列路径，不读内容）。
+    pub fn plaintext_passcode_paths(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if self.legacy_passcode_file().is_file() {
+            out.push(self.legacy_passcode_file());
+        }
+        if let Ok(rd) = std::fs::read_dir(self.passcodes_dir()) {
+            for entry in rd.flatten() {
+                if entry.path().is_file() {
+                    out.push(entry.path());
+                }
+            }
+        }
+        out
+    }
+
+    /// 删除用户点名的明文密码文件。`all` 连同旧的单文件一起删；否则只删这一台的文件。
+    /// 返回删掉的路径，不返回内容。
+    pub fn delete_plaintext_passcodes(&self, udid: Option<&str>, all: bool) -> std::io::Result<Vec<PathBuf>> {
+        let mut removed = Vec::new();
+        let targets: Vec<PathBuf> = if all {
+            self.plaintext_passcode_paths()
+        } else if let Some(udid) = udid {
+            let path = self.passcode_file_for(udid);
+            if path.is_file() { vec![path] } else { Vec::new() }
+        } else {
+            Vec::new()
+        };
+        for path in targets {
+            std::fs::remove_file(&path)?;
+            removed.push(path);
+        }
+        Ok(removed)
     }
     pub fn unlock_disabled_flag(&self) -> PathBuf {
         self.logs().join("UNLOCK-DISABLED")

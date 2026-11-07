@@ -65,6 +65,8 @@ zip = { version = "=9.4.1", default-features = false, features = ["deflate"] }
 regex = "=1.13.1"
 libc = "=0.2.191"
 sha2 = "=0.10.9"
+ring = "=0.17.14"
+zeroize = "=1.9.1"
 
 # vendored Impactor 组件（见 THIRD_PARTY.md）
 plume_core = { path = "vendor/plume_core" }

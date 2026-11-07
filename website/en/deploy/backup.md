@@ -15,7 +15,7 @@
 Location: `./data` in the repository directory for Docker (owned by root, mode 0700); `~/.local/share/iphone-control` for a source install, with pairing records in the system's `/var/lib/lockdown`. On macOS the data directory is also `~/.local/share/iphone-control`, and the system keeps pairing records in `/var/db/lockdown` (shared with Finder).
 
 ::: danger These are secrets
-The data directory can log in to your Apple ID developer account, connect to the phone without confirmation, and — with auto-unlock — contains the passcode in plain text. Never commit or share it, and keep backups encrypted.
+The data directory can still connect to the phone without another Trust prompt (pairing records). Newly stored Apple ID sessions are sealed and are not usable without the kernel keyring key from that boot. Older plaintext copies (`*.legacy-plaintext`, `secrets/passcode*`) are not deleted for you and do contain secrets. Never commit or share the directory, and keep backups encrypted. The passcode is no longer written here.
 :::
 
 ## Back up

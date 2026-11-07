@@ -10,15 +10,20 @@ services:
     image: ${IMAGE:-iphone-control:local}
     container_name: ${CONTAINER_NAME:-iphone-control}
     # 只开放 USB 设备（字符设备主号 189），不再整个 privileged；隧道走用户态 TCP 栈，不建网卡、不改宿主机网络。
-    # /dev/bus/usb 用绑定挂载（见 volumes）而不是 devices：拔插后新出现的设备节点在容器里也看得到
+    # /dev/bus/usb 仍是整条 USB 总线的绑定挂载：热插拔需要看到新节点，收不到只挂一台手机。
+    # cgroup 限制为 USB 字符设备（主号 189）。容器进程仍是 root，见 SECURITY.md。
     device_cgroup_rules:
       - "c 189:* rmw"
+    security_opt:
+      - no-new-privileges:true
     # 守护进程是 PID 1：加 init 回收子进程（stty 等），并把停止信号转给它
     init: true
     # 停止时先停 HID 屏幕媒体流、runner、usbmuxd；给够时间，避免被强杀后手机端留下会话
     stop_grace_period: 30s
-    # WDA 经 usbmuxd 直连手机，本机不监听任何端口；host 网络只为了用宿主机上的代理
-    network_mode: host
+    # 默认用 Compose 的独立网络，不进入宿主机网络命名空间。
+    # wda-bridge 因此只绑在容器自己的 127.0.0.1 上，宿主机上的其他用户连不到。
+    # 只有代理在宿主机的 127.0.0.1 上、容器必须走它时，才改回宿主机网络（会扩大 wda-bridge 的暴露面）：
+    # network_mode: host
     restart: unless-stopped
     env_file:
       - path: .env

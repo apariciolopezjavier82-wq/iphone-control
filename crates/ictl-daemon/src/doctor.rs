@@ -144,13 +144,17 @@ impl Daemon {
         } else {
             out.push("⚠️  没有配置通知  重签失败、手机离线、需要输密码时不会提醒你".into());
         }
-        let unlock = self.unlock_cfg(g.device.as_ref().map(|d| d.udid.as_str()));
-        if self.cfg.legacy_passcode_file().is_file() {
-            out.push(
-                "⚠️  有一份旧版本保存的锁屏密码,没记是哪台设备的;同时接着几台时不会用它\n     \
-→ 在要用的设备连着时运行 iphone-control passcode set(USB 上只接着一台时会自动归到那台名下)"
-                    .into(),
-            );
+        let unlock = self.unlock_cfg(g, g.device.as_ref().map(|d| d.udid.as_str()));
+        let legacy = self.cfg.plaintext_passcode_paths();
+        if !legacy.is_empty() {
+            let listed = legacy.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+            out.push(format!(
+                "⚠️  数据目录里还有明文锁屏密码文件,不会读取也不会自动删除: {listed}\n     \
+→ 确认不需要后运行 iphone-control passcode clear --all。要重新开启自动解锁,在守护进程运行时 passcode set(只进内存)"
+            ));
+        }
+        for note in ictl_sign::credential_warnings(&self.cfg.account_dir()) {
+            out.push(format!("⚠️  {note}"));
         }
         if unlock.disabled_by_failure() {
             out.push(

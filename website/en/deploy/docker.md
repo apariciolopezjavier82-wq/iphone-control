@@ -20,7 +20,10 @@ services:
       - "c 189:* rmw"
     init: true
     stop_grace_period: 30s
-    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    # Private network by default. Uncomment only if the proxy is on the host's loopback:
+    # network_mode: host
     restart: unless-stopped
     environment:
       # All optional — uncomment what you need; see "Configuration" for the full list
@@ -71,7 +74,7 @@ Afterwards, run the [setup wizard](../guide/getting-started) once.
 ## What the compose file does
 
 - Allows only USB character devices (`device_cgroup_rules: "c 189:* rmw"`) and bind-mounts `/dev/bus/usb`, so device nodes created after re-plugging show up in the container.
-- `network_mode: host` — only so the host's proxy is reachable; nothing listens on a port.
+- Private Compose network by default, with `no-new-privileges`. Uncomment `network_mode: host` only when a proxy listens on the host's loopback. The container is still root and still bind-mounts the whole USB bus.
 - Mounts `./data` at `/var/lib/iphone-control`, so pairing and login survive re-creating the container.
 - `init: true` and `stop_grace_period: 30s` — on stop it closes the sessions on the phone first, so no "paired computer" icon is left behind.
 

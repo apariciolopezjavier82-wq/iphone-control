@@ -180,12 +180,12 @@ impl dyn ADIProxy {
 
         debug!("Headers sent: {headers:?}");
 
-        let http_client = ClientBuilder::new()
-            .http1_title_case_headers()
-            .danger_accept_invalid_certs(true) // TODO: pin the apple certificate
-            .user_agent(AKD_USER_AGENT)
-            .default_headers(headers)
-            .build()?;
+        // Certificate validation stays on. Do not set danger_accept_invalid_certs.
+        let mut builder = ClientBuilder::new().http1_title_case_headers();
+        if let Ok(cert) = reqwest::Certificate::from_der(include_bytes!("../../plume_core/src/apple_root.der")) {
+            builder = builder.add_root_certificate(cert);
+        }
+        let http_client = builder.user_agent(AKD_USER_AGENT).default_headers(headers).build()?;
 
         Ok(http_client)
     }

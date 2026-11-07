@@ -3,7 +3,7 @@
 //! 运维命令（status、doctor、resign、unlock-reset）经控制接口问守护进程；
 //! setup、login、passcode 需要交互，直接在本进程里做。
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -81,6 +81,11 @@ enum Command {
     #[cfg(feature = "debug-cmds")]
     #[command(hide = true)]
     Debug(debug::DebugArgs),
+    /// 处理封存前留下的明文凭据副本。默认只列出路径；`--yes` 才删除
+    Credentials {
+        #[command(subcommand)]
+        action: CredentialsAction,
+    },
     /// 按已配置的渠道发测试通知：每类事件各一条（标题带「[测试]」），或只发指定的一类
     NotifyTest {
         /// resign / session / pin / pin-recovered / unlock / offline / online；不给就全发
@@ -88,7 +93,17 @@ enum Command {
     },
 }
 
-/// 锁屏密码按设备分开存：一台的密码不会输进另一台
+/// 封存会话之后留下的明文副本
+#[derive(Subcommand)]
+enum CredentialsAction {
+    /// 列出（或在 `--yes` 时删除）`account/` 里的 `*.legacy-plaintext`。不打印内容，也不删除仍在使用的文件
+    DiscardLegacy {
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// 锁屏密码按设备分开：一台的密码不会输进另一台。密码只进守护进程内存。
 #[derive(Subcommand)]
 enum PasscodeAction {
     Set {
@@ -141,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Sign => print_text(&cli.socket, Request::Resign { force: true }).await,
         Command::Resign { force } => print_text(&cli.socket, Request::Resign { force }).await,
         Command::Passcode { action } => passcode(&cli.data_dir, &cli.socket, action).await,
+        Command::Credentials { action } => credentials(&cli.data_dir, action),
         Command::UnlockReset => print_text(&cli.socket, Request::UnlockReset).await,
         Command::Devices => print_text(&cli.socket, Request::ListDevices).await,
         Command::Select { device } => print_text(&cli.socket, Request::SelectDevice { device }).await,
@@ -313,23 +329,46 @@ fn read_line(prompt: &str) -> anyhow::Result<String> {
     Ok(s.trim().to_owned())
 }
 
-/// 不回显地读一行（用 stty 关回显，不引入额外依赖）
+const SECRET_ECHO_REFUSAL: &str =
+    "拒绝读取密码：无法关闭终端回显（没有控制终端，或 stty -echo 失败）。密码不会在可见输入下读取。";
+
+/// 关不掉回显就失败。不读取输入。
+fn secret_input_allowed(echo_hidden: bool) -> anyhow::Result<()> {
+    if echo_hidden { Ok(()) } else { bail!(SECRET_ECHO_REFUSAL) }
+}
+
+/// 不回显地读一行。关不掉回显就拒绝，不读入密码。
 fn read_secret(prompt: &str) -> anyhow::Result<String> {
-    let stty = |arg: &str| {
-        std::process::Command::new("stty")
-            .arg(arg)
-            .stdin(
-                std::fs::File::open("/dev/tty").map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()),
-            )
+    let tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok();
+    let echo_hidden = match &tty {
+        Some(tty) => std::process::Command::new("stty")
+            .arg("-echo")
+            .stdin(std::process::Stdio::from(tty.try_clone()?))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        None => false,
     };
-    let echo_off = stty("-echo").map(|s| s.success()).unwrap_or(false);
-    let r = read_line(prompt);
-    if echo_off {
-        let _ = stty("echo");
-        println!();
+    struct RestoreEcho;
+    impl Drop for RestoreEcho {
+        fn drop(&mut self) {
+            if let Ok(tty) = std::fs::File::open("/dev/tty") {
+                let _ = std::process::Command::new("stty")
+                    .arg("echo")
+                    .stdin(std::process::Stdio::from(tty))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
     }
-    r
+    let _restore = echo_hidden.then_some(RestoreEcho);
+    secret_input_allowed(echo_hidden)?;
+    let secret = read_line(prompt)?;
+    println!();
+    Ok(secret)
 }
 
 /// 账号目录和 anisette 地址：与守护进程同一份配置（路径、环境变量的读法都在 Config 里）
@@ -361,14 +400,23 @@ async fn login(data_dir: &Path, email: Option<String>) -> anyhow::Result<()> {
             ictl_sign::TwoFactorMethod::Device if sms => "设备上收到的验证码(输入 sms 改为短信接收): ",
             ictl_sign::TwoFactorMethod::Device => "设备上收到的验证码: ",
         };
-        let code = read_line(prompt).map_err(|e| e.to_string())?;
+        let code = read_secret(prompt).map_err(|e| e.to_string())?;
         if sms && code.eq_ignore_ascii_case("sms") {
             return Ok(ictl_sign::TwoFactorAction::SendSms(req.trusted_phone_numbers[0].id));
         }
         Ok(ictl_sign::TwoFactorAction::SubmitCode(code))
     };
     account_dir(data_dir).login(&email, &password, two_factor).await?;
-    println!("登录成功，会话已保存到 {}", account_dir(data_dir).dir.display());
+    println!(
+        "登录成功。会话令牌和开发私钥已用 Linux 内核密钥环封存到 {}，没有写成明文。",
+        account_dir(data_dir).dir.display()
+    );
+    println!(
+        "重启或重建容器后密钥环里的密钥会消失，需要重新登录。0600 不是加密；同一用户和 root 仍能读密钥环和进程内存。"
+    );
+    for note in ictl_sign::credential_warnings(&account_dir(data_dir).dir) {
+        println!("注意：{note}");
+    }
     Ok(())
 }
 
@@ -412,37 +460,87 @@ async fn target_device(socket: &Path, query: Option<&str>) -> anyhow::Result<ict
     }
 }
 
+fn credentials(data_dir: &Path, action: CredentialsAction) -> anyhow::Result<()> {
+    let dir = account_dir(data_dir).dir;
+    match action {
+        CredentialsAction::DiscardLegacy { yes } => {
+            let report = ictl_sign::discard_legacy_plaintext(&dir, yes)?;
+            if report.found.is_empty() {
+                println!("没有 *.legacy-plaintext 副本。");
+            } else if yes {
+                println!("已删除这些明文副本（内容未显示）：");
+                for p in &report.deleted {
+                    println!("  {}", p.display());
+                }
+            } else {
+                println!("这些明文副本还在。内容未显示。确认后加 --yes 才会删除：");
+                for p in &report.found {
+                    println!("  {}", p.display());
+                }
+            }
+            for note in ictl_sign::credential_warnings(&dir) {
+                if !note.contains("legacy-plaintext") {
+                    println!("注意：{note}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn passcode(data_dir: &Path, socket: &Path, action: PasscodeAction) -> anyhow::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let cfg = ictl_daemon::Config::from_env(data_dir);
     match action {
-        PasscodeAction::Clear { all: true, .. } => {
-            let _ = std::fs::remove_dir_all(cfg.passcodes_dir());
-            let _ = std::fs::remove_file(cfg.legacy_passcode_file());
-            println!("已删除所有设备的锁屏密码，自动解锁关闭。");
-        }
-        PasscodeAction::Clear { device, .. } => {
-            let d = target_device(socket, device.as_deref()).await?;
-            let _ = std::fs::remove_file(cfg.passcode_file_for(&d.udid));
-            println!("已删除 {} 的锁屏密码，这台的自动解锁关闭。", ictl_daemon::core::device_label(&d));
+        PasscodeAction::Clear { all, device } => {
+            let udid = if all { None } else { Some(target_device(socket, device.as_deref()).await?.udid) };
+            match protocol::call(
+                socket,
+                &Request::ClearPasscode { udid: udid.clone(), all },
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            {
+                Ok(Response::Text { text }) => println!("{text}"),
+                Ok(Response::Error { message }) => bail!("{message}"),
+                Ok(Response::Image { .. }) => bail!("守护进程返回了意外结果"),
+                Err(e) => {
+                    let removed = cfg.delete_plaintext_passcodes(udid.as_deref(), all)?;
+                    println!("守护进程没在运行，内存中的密码不会保留。{e}");
+                    if removed.is_empty() {
+                        println!("数据目录里没有明文锁屏密码文件。");
+                    } else {
+                        println!("已删除这些明文文件（内容未显示）：");
+                        for p in &removed {
+                            println!("  {}", p.display());
+                        }
+                    }
+                }
+            }
         }
         PasscodeAction::Set { device } => {
             let d = target_device(socket, device.as_deref()).await?;
-            let path = cfg.passcode_file_for(&d.udid);
             println!("设备：{}", ictl_daemon::core::device_label(&d));
-            println!("自动解锁：锁屏后，MCP 操作前会用这个密码解锁手机。");
-            println!("风险：能登录这台机器、或能调用这个 MCP 的人，都能解锁你的手机。");
+            println!("自动解锁：锁屏后，MCP 操作前会用这个密码解锁手机。密码只留在守护进程内存里，重启后要重新设置。");
+            println!("风险：能调用这个 MCP 的人、同一用户和 root，都能在进程还活着时解锁手机。");
+            println!("不会把密码写入数据目录。旧的明文文件留在原地，直到你运行 passcode clear。");
             println!("保护：每按一位都核对；整串输完仍锁着就停用自动解锁并推送通知，不会累计输错。只支持纯数字。");
             let p = read_secret("锁屏密码(输入不显示): ")?;
-            if p.len() < 4 || !p.bytes().all(|b| b.is_ascii_digit()) {
-                bail!("只支持 4 位以上的纯数字密码");
+            if !(4..=32).contains(&p.len()) || !p.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("只支持 4 到 32 位的纯数字密码");
             }
-            cfg.ensure_passcodes_dir()?;
-            let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&path)?;
-            // mode() 只在新建时生效：已有文件也收紧
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            f.write_all(p.as_bytes())?;
-            println!("已保存（只用于这台设备）。别忘了在手机上把「自动锁定」从「永不」改回较短时间。");
+            match protocol::call(
+                socket,
+                &Request::SetPasscode { udid: d.udid, passcode: p },
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            {
+                Ok(Response::Text { text }) => println!("{text}"),
+                Ok(Response::Error { message }) => bail!("{message}"),
+                Ok(Response::Image { .. }) => bail!("守护进程返回了意外结果"),
+                Err(e) => bail!("守护进程没在运行，拒绝把锁屏密码写进文件：{e}"),
+            }
+            println!("别忘了在手机上把「自动锁定」从「永不」改回较短时间。");
         }
     }
     Ok(())
@@ -566,29 +664,56 @@ async fn setup(cli: &Cli) -> anyhow::Result<()> {
 }
 
 /// 显式开启：127.0.0.1:port → 手机上的 WDA 8100。只绑本机回环地址。
-/// 容器用 host 网络，所以这就是宿主机的回环地址：本机的其他用户、浏览器里的网页都能访问到，而 WDA 没有认证。
-/// 浏览器那条路（DNS rebinding）靠检查 Host 头挡住；本机其他用户挡不住，用完就停。
+/// WDA 本身没有认证。每个请求都要带本进程生成的令牌，并且 Host 必须是回环名。
+/// 没有关闭认证的开关。用完就停。
 async fn wda_bridge(socket: &Path, port: u16) -> anyhow::Result<()> {
-    // 和守护进程控制同一台（WDA 只在那台上跑着）
     let target = target_device(socket, None).await?;
     let device = ictl_device::Device::find(Some(&target.udid)).await?;
+    let token_path = bridge_token_path(socket);
+    let token = write_bridge_token(&token_path)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("WDA 桥接 127.0.0.1:{port} → 手机 {} 的 8100 端口（Ctrl-C 停止）", device.udid);
-    println!("注意：本机所有用户都能经这个端口控制手机（WDA 没有认证），用完就停掉。");
+    println!("令牌文件（0600，内容不在这里打印）：{}", token_path.display());
+    println!("请求要带 Host 为 127.0.0.1 / localhost / [::1]，以及 Authorization: Bearer <令牌文件内容>。");
+    println!("没有令牌的本机用户连不上。用完就停掉这个进程。");
     loop {
         let (client, _) = listener.accept().await?;
         let device = device.clone();
+        let token = token.clone();
         tokio::spawn(async move {
-            if let Err(e) = bridge_conn(client, &device).await {
+            if let Err(e) = bridge_conn(client, &device, &token).await {
                 tracing::warn!("桥接连接出错：{e}");
             }
         });
     }
 }
 
+fn bridge_token_path(socket: &Path) -> PathBuf {
+    socket.parent().unwrap_or_else(|| Path::new(".")).join("wda-bridge.token")
+}
+
+fn write_bridge_token(path: &Path) -> anyhow::Result<String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut raw = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(path)?;
+    f.write_all(token.as_bytes())?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(token)
+}
+
 /// 先读到第一个请求的头部，Host 必须是本机回环地址才转发：恶意网页借 DNS rebinding 发到 127.0.0.1 的请求，
 /// Host 头是它自己的域名
-async fn bridge_conn(mut client: tokio::net::TcpStream, device: &ictl_device::Device) -> anyhow::Result<()> {
+async fn bridge_conn(
+    mut client: tokio::net::TcpStream,
+    device: &ictl_device::Device,
+    token: &str,
+) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut head = Vec::new();
     let mut buf = [0u8; 4096];
@@ -602,7 +727,7 @@ async fn bridge_conn(mut client: tokio::net::TcpStream, device: &ictl_device::De
         }
         head.extend_from_slice(&buf[..n]);
     }
-    if !host_is_loopback(&head) {
+    if !bridge_authorized(&head, token) {
         client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
         return Ok(());
     }
@@ -628,17 +753,99 @@ fn host_is_loopback(head: &[u8]) -> bool {
     matches!(name.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
+fn header_value(head: &[u8], name: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(head);
+    text.split("\r\n").skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+    })
+}
+
+fn bridge_authorized(head: &[u8], token: &str) -> bool {
+    if token.is_empty() || !host_is_loopback(head) {
+        return false;
+    }
+    let Some(value) = header_value(head, "authorization") else {
+        return false;
+    };
+    let Some(got) = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")) else {
+        return false;
+    };
+    tokens_equal(got.trim(), token)
+}
+
+fn tokens_equal(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::host_is_loopback;
+    use super::{bridge_authorized, host_is_loopback, secret_input_allowed, write_bridge_token};
+
+    const TOKEN: &str = "synthetic-bridge-token";
+
+    fn req(extra: &str) -> Vec<u8> {
+        format!("GET /status HTTP/1.1\r\n{extra}\r\n\r\n").into_bytes()
+    }
 
     #[test]
-    fn bridge_only_accepts_loopback_host() {
+    fn bridge_requires_loopback_host_and_bearer_token() {
         assert!(host_is_loopback(b"GET /status HTTP/1.1\r\nHost: 127.0.0.1:8100\r\n\r\n"));
-        assert!(host_is_loopback(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n"));
-        assert!(host_is_loopback(b"GET / HTTP/1.1\r\nHost: [::1]:8100\r\n\r\n"));
-        assert!(!host_is_loopback(b"GET / HTTP/1.1\r\nHost: evil.example:8100\r\n\r\n"));
-        assert!(!host_is_loopback(b"GET / HTTP/1.1\r\nHost: localhost.evil.example\r\n\r\n"));
-        assert!(!host_is_loopback(b"GET / HTTP/1.1\r\n\r\n"));
+        assert!(!host_is_loopback(b"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n"));
+        let ok = req("Host: 127.0.0.1:8100\r\nAuthorization: Bearer synthetic-bridge-token");
+        assert!(bridge_authorized(&ok, TOKEN));
+        assert!(bridge_authorized(&req("Host: localhost\r\nAuthorization: bearer synthetic-bridge-token"), TOKEN));
+        assert!(!bridge_authorized(&req("Host: 127.0.0.1\r\n"), TOKEN));
+        assert!(!bridge_authorized(&req("Host: evil.example\r\nAuthorization: Bearer synthetic-bridge-token"), TOKEN));
+        assert!(!bridge_authorized(&req("Host: 127.0.0.1\r\nAuthorization: Bearer wrong-token"), TOKEN));
+        assert!(!bridge_authorized(&ok, ""));
+        assert!(!bridge_authorized(
+            &req("Host: localhost.evil.example\r\nAuthorization: Bearer synthetic-bridge-token"),
+            TOKEN
+        ));
+    }
+
+    #[test]
+    fn secret_prompt_fails_closed_when_echo_cannot_be_hidden() {
+        let err = secret_input_allowed(false).unwrap_err().to_string();
+        assert!(err.contains("拒绝读取密码"), "{err}");
+        assert!(secret_input_allowed(true).is_ok());
+    }
+
+    #[test]
+    fn bridge_token_file_is_owner_only_and_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ictl-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("wda-bridge.token");
+        let token = write_bridge_token(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), token);
+        assert!(!token.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn compose_defaults_are_not_host_network_or_privileged() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let compose = std::fs::read_to_string(root.join("compose.yaml")).unwrap();
+        for line in compose.lines() {
+            let t = line.trim();
+            if t.starts_with('#') {
+                continue;
+            }
+            assert!(!t.starts_with("network_mode:"), "{line}");
+            assert!(!t.starts_with("privileged:"), "{line}");
+        }
+        assert!(compose.contains("no-new-privileges:true"), "{compose}");
     }
 }

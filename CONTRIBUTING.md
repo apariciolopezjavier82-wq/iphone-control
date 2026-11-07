@@ -55,7 +55,7 @@ Notes:
 
 ### Adding an element-tree fixture
 
-1. `iphone-control wda-bridge --port 18100` (stop it afterwards — WebDriverAgent has no authentication).
+1. `iphone-control wda-bridge --port 18100` (stop it afterwards). WebDriverAgent has no authentication of its own; the bridge requires the bearer token from the mode-0600 file whose path it prints.
 2. ```bash
    curl -s "127.0.0.1:18100/source?format=xml&excluded_attributes=visible,accessible,focused,enabled,selected,index,traits,placeholderValue,hittable,customActions,nativeFrame" \
      | python3 -c 'import sys, json; print(json.load(sys.stdin)["value"])' > fixture.xml

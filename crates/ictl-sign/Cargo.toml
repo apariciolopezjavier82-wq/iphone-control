@@ -17,3 +17,13 @@ tracing.workspace = true
 plist.workspace = true
 uuid.workspace = true
 zip.workspace = true
+ring.workspace = true
+zeroize.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+omnisette = { path = "../../vendor/omnisette", default-features = false, features = ["remote-anisette-v3"] }
+reqwest.workspace = true
+rustls.workspace = true
+rcgen = "=0.12.1"
+tokio.workspace = true
