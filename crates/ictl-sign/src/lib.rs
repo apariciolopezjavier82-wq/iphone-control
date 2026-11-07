@@ -13,7 +13,7 @@ pub mod ipa;
 pub mod profile;
 mod secrets;
 
-pub use secrets::{LegacyDiscard, credential_warnings, discard_legacy_plaintext};
+pub use secrets::{KeyringCheck, LegacyDiscard, credential_warnings, discard_legacy_plaintext, keyring_preflight};
 
 use std::path::{Path, PathBuf};
 
@@ -86,6 +86,8 @@ impl AccountDir {
         password: &str,
         two_factor: impl Fn(TwoFactorRequest) -> std::result::Result<TwoFactorAction, String>,
     ) -> Result<String> {
+        // 先探测密钥环，再读账号目录，再调用苹果。探测失败不会发出登录请求，也不写明文。
+        secrets::keyring_preflight().require_for_apple_login().map_err(SignError::Secrets)?;
         restrict_dir(&self.dir)?;
         let view = secrets::RuntimeAccount::open(&self.dir)?;
         view.ensure_key()?;

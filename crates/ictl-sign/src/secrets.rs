@@ -45,6 +45,35 @@ pub struct LegacyDiscard {
     pub deleted: Vec<PathBuf>,
 }
 
+/// 一次临时密钥环探测的结果。`summary` 只有结论和系统错误，没有密钥字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyringCheck {
+    pub ok: bool,
+    pub summary: String,
+}
+
+impl KeyringCheck {
+    /// 登录在调用苹果之前必须先通过。失败时返回的文字就是 [`Self::summary`]。
+    pub fn require_for_apple_login(&self) -> Result<(), String> {
+        if self.ok { Ok(()) } else { Err(self.summary.clone()) }
+    }
+}
+
+/// 创建、读回并撤销一把临时合成密钥。不写文件，不用账号数据，不碰 USB。
+/// 成功也不保留这把密钥。失败时登录必须停在联系苹果之前，并且不能改成明文存储。
+pub fn keyring_preflight() -> KeyringCheck {
+    match ephemeral_key_roundtrip() {
+        Ok(()) => KeyringCheck {
+            ok: true,
+            summary:
+                "内核用户密钥环可用：已创建、读回并撤销一把临时合成密钥。密钥不保留，检查没有使用账号、USB 或真实秘密。\
+登录在联系苹果之前会再确认一次；确认失败就不会把会话写成明文。"
+                    .into(),
+        },
+        Err(summary) => KeyringCheck { ok: false, summary },
+    }
+}
+
 pub(crate) struct RuntimeAccount {
     root: PathBuf,
     durable: PathBuf,
@@ -250,6 +279,73 @@ fn open_sealed(key: &SealKey, blob: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn ephemeral_key_roundtrip() -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Err(keyring_unavailable("keyring", &io::Error::new(io::ErrorKind::Unsupported, "not Linux")));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let desc =
+            match std::ffi::CString::new(format!("ictl-preflight-{}-{}", std::process::id(), uuid::Uuid::new_v4())) {
+                Ok(desc) => desc,
+                Err(_) => return Err("临时密钥名无效".into()),
+            };
+        let mut payload = [0u8; 32];
+        if let Err(e) = fill_random(&mut payload) {
+            payload.zeroize();
+            return Err(keyring_unavailable("urandom", &e));
+        }
+        // 加到会话密钥环：当前进程是持有者，才能读回。不放进用户密钥环，检查结束就作废。
+        let id = match add_user_key(&desc, &payload, KEY_SPEC_SESSION_KEYRING) {
+            Ok(id) => id,
+            Err(e) => {
+                payload.zeroize();
+                return Err(keyring_unavailable("add_key", &e));
+            }
+        };
+        let got = match read_user_key(id) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                payload.zeroize();
+                discard_key(id);
+                return Err(keyring_unavailable("keyctl", &e));
+            }
+        };
+        let matches = got.iter().zip(payload.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0;
+        payload.zeroize();
+        let mut got = got;
+        got.zeroize();
+        discard_key(id);
+        if !matches {
+            return Err(keyring_unavailable("keyctl", &io::Error::new(io::ErrorKind::InvalidData, "payload mismatch")));
+        }
+        for ring in [KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING] {
+            match search_keyring(ring, &desc) {
+                Ok(None) => {}
+                Ok(Some(stuck)) => {
+                    discard_key(stuck);
+                    return Err(
+                        "临时合成密钥在撤销后仍能被找到。登录不会联系苹果，也不会把会话写成明文。没有保留这把密钥的内容。"
+                            .into(),
+                    );
+                }
+                Err(e) => return Err(keyring_unavailable("keyctl", &e)),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn keyring_unavailable(op: &str, err: &io::Error) -> String {
+    format!(
+        "内核用户密钥环不可用（{op}: {err}）。登录不会联系苹果，也不会把会话或签名私钥写成明文。\
+Docker 文档里的默认 seccomp 会拦截 add_key、keyctl 和 request_key，因为内核密钥环没有命名空间；\
+EPERM 也可能是别的限制，这一次检查不能单独证明就是 seccomp。\
+不要放宽 seccomp，也不要改成明文。请在宿主机上用普通用户运行 iphone-control keyring-check（沿用系统 usbmuxd，不要停掉它，也不要同时再起容器里的 usbmuxd）。"
+    )
+}
+
 fn load_key() -> KeyLoad {
     match load_kernel_key() {
         Ok(k) => KeyLoad::Ready(k),
@@ -259,57 +355,141 @@ fn load_key() -> KeyLoad {
 
 #[cfg(target_os = "linux")]
 fn load_kernel_key() -> Result<SealKey, String> {
-    const KEYCTL_SEARCH: libc::c_long = 10;
-    const KEYCTL_READ: libc::c_long = 11;
-    const KEY_SPEC_USER_KEYRING: libc::c_long = -4;
-    let typ = std::ffi::CString::new("user").unwrap();
     let desc = std::ffi::CString::new(KEY_DESC).unwrap();
-    let id = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_SEARCH, KEY_SPEC_USER_KEYRING, typ.as_ptr(), desc.as_ptr(), 0)
-    };
-    if id >= 0 {
-        let mut buf = [0u8; 32];
-        let n = unsafe { libc::syscall(libc::SYS_keyctl, KEYCTL_READ, id, buf.as_mut_ptr(), buf.len()) };
-        if n == 32 {
-            return Ok(SealKey::new(buf));
+    match search_keyring(KEY_SPEC_USER_KEYRING, &desc) {
+        Err(e) => return Err(keyring_unavailable("keyctl", &e)),
+        Ok(Some(id)) => match read_user_key(id) {
+            Ok(bytes) => return Ok(SealKey::new(bytes)),
+            // 上一版只加到用户密钥环、没有给同用户读权限。那种密钥读不出来，也从未用来封存成功。
+            Err(e) if e.raw_os_error() == Some(libc::EACCES) => {
+                let _ = unlink_from(id, KEY_SPEC_USER_KEYRING);
+            }
+            Err(e) => return Err(keyring_unavailable("keyctl", &e)),
+        },
+        Ok(None) => {}
+    }
+    let mut payload = [0u8; 32];
+    if let Err(e) = fill_random(&mut payload) {
+        payload.zeroize();
+        return Err(keyring_unavailable("urandom", &e));
+    }
+    let id = match add_user_key(&desc, &payload, KEY_SPEC_SESSION_KEYRING) {
+        Ok(id) => id,
+        Err(e) => {
+            payload.zeroize();
+            return Err(keyring_unavailable("add_key", &e));
         }
-        buf.zeroize();
-        return Err(format!(
-            "Linux kernel keyring key {KEY_DESC} has length {n}; refusing to write session tokens or signing keys as plaintext"
-        ));
+    };
+    // 持有者全能，同 UID 可读可搜索。其他用户没有权限。
+    const PERM_SAME_USER_READ: libc::c_ulong = 0x3f0b_0000;
+    if let Err(e) = keyctl2(KEYCTL_SETPERM, id, PERM_SAME_USER_READ as libc::c_long) {
+        payload.zeroize();
+        discard_key(id);
+        return Err(keyring_unavailable("keyctl", &e));
     }
-    let search_err = io::Error::last_os_error();
-    // ENOKEY: not there yet. Anything else (blocked syscall, quota, permission) stays fail-closed.
-    if search_err.raw_os_error() != Some(libc::ENOKEY) {
-        return Err(format!(
-            "Linux kernel keyring is unavailable ({search_err}); refusing to write session tokens or signing keys as plaintext"
-        ));
+    if let Err(e) = keyctl2(KEYCTL_LINK, id, KEY_SPEC_USER_KEYRING) {
+        payload.zeroize();
+        discard_key(id);
+        return Err(keyring_unavailable("keyctl", &e));
     }
-    let mut key = [0u8; 32];
-    if let Err(e) = fill_random(&mut key) {
-        key.zeroize();
-        return Err(format!(
-            "could not generate a sealing key ({e}); refusing to write session tokens or signing keys as plaintext"
-        ));
+    let _ = unlink_from(id, KEY_SPEC_SESSION_KEYRING);
+    let stored = match search_keyring(KEY_SPEC_USER_KEYRING, &desc).and_then(|found| {
+        found
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "sealing key was not linked"))
+            .and_then(read_user_key)
+    }) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            payload.zeroize();
+            discard_key(id);
+            return Err(keyring_unavailable("keyctl", &e));
+        }
+    };
+    let matches = stored.iter().zip(payload.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0;
+    payload.zeroize();
+    if !matches {
+        let mut stored = stored;
+        stored.zeroize();
+        discard_key(id);
+        return Err(keyring_unavailable("keyctl", &io::Error::new(io::ErrorKind::InvalidData, "payload mismatch")));
     }
-    let added = unsafe {
+    Ok(SealKey::new(stored))
+}
+
+#[cfg(target_os = "linux")]
+const KEYCTL_SETPERM: libc::c_long = 5;
+#[cfg(target_os = "linux")]
+const KEYCTL_LINK: libc::c_long = 8;
+#[cfg(target_os = "linux")]
+const KEYCTL_UNLINK: libc::c_long = 9;
+#[cfg(target_os = "linux")]
+const KEYCTL_SEARCH: libc::c_long = 10;
+#[cfg(target_os = "linux")]
+const KEYCTL_READ: libc::c_long = 11;
+#[cfg(target_os = "linux")]
+const KEYCTL_INVALIDATE: libc::c_long = 21;
+#[cfg(target_os = "linux")]
+const KEY_SPEC_SESSION_KEYRING: libc::c_long = -3;
+#[cfg(target_os = "linux")]
+const KEY_SPEC_USER_KEYRING: libc::c_long = -4;
+
+#[cfg(target_os = "linux")]
+fn add_user_key(desc: &std::ffi::CStr, payload: &[u8; 32], ring: libc::c_long) -> io::Result<libc::c_long> {
+    let typ = std::ffi::CString::new("user").unwrap();
+    let id = unsafe {
         libc::syscall(
             libc::SYS_add_key,
             typ.as_ptr(),
             desc.as_ptr(),
-            key.as_ptr(),
-            key.len() as libc::size_t,
-            KEY_SPEC_USER_KEYRING,
+            payload.as_ptr(),
+            payload.len() as libc::size_t,
+            ring,
         )
     };
-    if added < 0 {
-        let e = io::Error::last_os_error();
-        key.zeroize();
-        return Err(format!(
-            "Linux kernel keyring is unavailable ({e}); refusing to write session tokens or signing keys as plaintext"
-        ));
+    if id < 0 { Err(io::Error::last_os_error()) } else { Ok(id) }
+}
+
+#[cfg(target_os = "linux")]
+fn keyctl2(op: libc::c_long, id: libc::c_long, arg: libc::c_long) -> io::Result<()> {
+    let rc = unsafe { libc::syscall(libc::SYS_keyctl, op, id, arg) };
+    if rc < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(target_os = "linux")]
+fn read_user_key(id: libc::c_long) -> io::Result<[u8; 32]> {
+    let mut buf = [0u8; 32];
+    let n = unsafe { libc::syscall(libc::SYS_keyctl, KEYCTL_READ, id, buf.as_mut_ptr(), buf.len()) };
+    if n == 32 {
+        Ok(buf)
+    } else {
+        let err = io::Error::last_os_error();
+        buf.zeroize();
+        Err(if n < 0 { err } else { io::Error::new(io::ErrorKind::InvalidData, format!("read {n} bytes")) })
     }
-    Ok(SealKey::new(key))
+}
+
+#[cfg(target_os = "linux")]
+fn search_keyring(ring: libc::c_long, desc: &std::ffi::CStr) -> io::Result<Option<libc::c_long>> {
+    let typ = std::ffi::CString::new("user").unwrap();
+    let id = unsafe { libc::syscall(libc::SYS_keyctl, KEYCTL_SEARCH, ring, typ.as_ptr(), desc.as_ptr(), 0) };
+    if id >= 0 {
+        Ok(Some(id))
+    } else {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOKEY) { Ok(None) } else { Err(err) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unlink_from(id: libc::c_long, ring: libc::c_long) -> io::Result<()> {
+    keyctl2(KEYCTL_UNLINK, id, ring)
+}
+
+#[cfg(target_os = "linux")]
+fn discard_key(id: libc::c_long) {
+    let _ = unlink_from(id, KEY_SPEC_SESSION_KEYRING);
+    let _ = unlink_from(id, KEY_SPEC_USER_KEYRING);
+    let _ = unsafe { libc::syscall(libc::SYS_keyctl, KEYCTL_INVALIDATE, id) };
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -616,6 +796,53 @@ mod tests {
         assert_eq!(fs::read(dir.join("accounts.json")).unwrap(), sealed);
         assert_eq!(fs::read_to_string(dir.join("accounts.json.legacy-plaintext")).unwrap(), body);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_uses_an_ephemeral_key_and_blocks_apple_login_on_failure() {
+        let check = keyring_preflight();
+        assert!(!check.summary.contains("unconfined"), "{}", check.summary);
+        assert!(!check.summary.contains("SYNTHETIC-SESSION-TOKEN"), "{}", check.summary);
+        if check.ok {
+            assert!(check.require_for_apple_login().is_ok());
+            assert!(check.summary.contains("撤销"), "{}", check.summary);
+        } else {
+            let mut contacted_apple = false;
+            let err = (|| {
+                check.require_for_apple_login()?;
+                contacted_apple = true;
+                Ok::<(), String>(())
+            })()
+            .unwrap_err();
+            assert!(!contacted_apple);
+            assert!(err.contains("不会联系苹果"), "{err}");
+            assert!(err.contains("明文"), "{err}");
+        }
+    }
+
+    #[test]
+    fn blocked_keyring_does_not_offer_plaintext_or_a_weaker_seccomp() {
+        let check =
+            KeyringCheck { ok: false, summary: keyring_unavailable("add_key", &std::io::Error::from_raw_os_error(1)) };
+        let mut contacted_apple = false;
+        let err = (|| {
+            check.require_for_apple_login()?;
+            contacted_apple = true;
+            Ok::<(), String>(())
+        })()
+        .unwrap_err();
+        assert!(!contacted_apple);
+        assert!(err.contains("add_key"));
+        assert!(err.contains("不会联系苹果"));
+        assert!(err.contains("明文"));
+        assert!(!err.contains("unconfined"));
+        assert!(!err.contains("danger_accept"));
+        let src = include_str!("lib.rs");
+        let login = src.split("pub async fn login").nth(1).unwrap();
+        let login = login.split("pub async fn selected_email").next().unwrap();
+        let gate = login.find("require_for_apple_login").expect("login must check the keyring");
+        let apple = login.find("PlumeAccount::login").expect("login calls Apple");
+        assert!(gate < apple, "keyring gate must run before Apple authentication");
     }
 
     #[test]

@@ -19,6 +19,7 @@ All notable changes to this project are documented here. The format is based on 
 ### Changed
 
 - `passcode set` requires the daemon to be running. It does not fall back to a file.
+- `iphone-control keyring-check` (and `doctor`) creates, reads, and revokes an ephemeral synthetic kernel key. Login runs that check before prompting for the Apple ID password and before any Apple request. There is still no plaintext fallback and no seccomp bypass.
 
 ## [0.1.4] - 2026-11-07
 

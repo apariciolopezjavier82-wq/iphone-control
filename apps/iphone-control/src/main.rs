@@ -44,6 +44,8 @@ enum Command {
     Status,
     /// 逐层诊断，每项失败都给出修复办法
     Doctor,
+    /// 探测内核用户密钥环：创建、读回并撤销一把临时合成密钥。不登录、不碰 USB、不写账号数据
+    KeyringCheck,
     /// 首次安装向导：配对 → 开发者模式 → 登录 Apple ID → 签名安装 WDA（可重复运行）
     Setup,
     /// 登录 Apple ID（密码和双重认证验证码只在这里输入）
@@ -151,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Status => status(&cli.socket).await,
         Command::Doctor => print_text(&cli.socket, Request::Doctor).await,
+        Command::KeyringCheck => keyring_check(),
         Command::Setup => setup(&cli).await,
         Command::Login { email } => login(&cli.data_dir, email).await,
         Command::Sign => print_text(&cli.socket, Request::Resign { force: true }).await,
@@ -377,7 +380,17 @@ fn account_dir(data_dir: &Path) -> ictl_sign::AccountDir {
     ictl_sign::AccountDir { dir: cfg.account_dir(), anisette_url: cfg.anisette_url }
 }
 
+fn keyring_check() -> anyhow::Result<()> {
+    let check = ictl_sign::keyring_preflight();
+    println!("{}", check.summary);
+    if check.ok { Ok(()) } else { bail!("{}", check.summary) }
+}
+
 async fn login(data_dir: &Path, email: Option<String>) -> anyhow::Result<()> {
+    let check = ictl_sign::keyring_preflight();
+    if !check.ok {
+        bail!("{}", check.summary);
+    }
     println!("建议用一个专门的免费 Apple ID，不要用主账号。");
     println!(
         "密码和验证码由本程序直接发给苹果；登录时会请求 anisette 服务生成设备标识（默认第三方，可用 ICTL_ANISETTE_URL 改成自建）。"
@@ -811,6 +824,16 @@ mod tests {
             &req("Host: localhost.evil.example\r\nAuthorization: Bearer synthetic-bridge-token"),
             TOKEN
         ));
+    }
+
+    #[test]
+    fn login_checks_the_keyring_before_asking_for_the_password() {
+        let src = include_str!("main.rs");
+        let login = src.split("async fn login(").nth(1).expect("login fn");
+        let login = login.split("async fn ").next().unwrap();
+        let gate = login.find("keyring_preflight").expect("preflight");
+        let prompt = login.find("read_secret").expect("password prompt");
+        assert!(gate < prompt, "keyring check must run before the Apple ID password prompt");
     }
 
     #[test]

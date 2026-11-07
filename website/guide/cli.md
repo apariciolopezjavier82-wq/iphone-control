@@ -62,6 +62,7 @@
 | `notify-test [事件]` | 发测试通知：每类事件各一条，或只发一类（`resign`、`session`、`pin`、`pin-recovered`、`unlock`、`offline`、`online`） |
 | `wda-bridge [--port <端口>]` | 把 WDA 桥接到 `127.0.0.1`，端口默认 8100。请求要带 0600 令牌文件里的 Bearer 令牌（命令只打印路径）。用完就停 |
 | `credentials discard-legacy [--yes]` | 列出封存前留下的明文副本。`--yes` 只删除 `*.legacy-plaintext`，不打印内容 |
+| `keyring-check` | 创建、读回并撤销一把临时合成内核密钥。不登录苹果、不碰 USB、不保存秘密。密钥环不可用时以非零状态退出 |
 
 调试用的 `debug` 子命令默认不编译，见[贡献指南](https://github.com/Derrors/iphone-control/blob/main/CONTRIBUTING.md#testing-on-a-real-phone)。
 

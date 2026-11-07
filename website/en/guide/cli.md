@@ -62,6 +62,7 @@ See [Auto-unlock](./auto-unlock). `--device` takes a UDID or name, and the devic
 | `notify-test [event]` | Send test notifications: one per event type, or one type (`resign`, `session`, `pin`, `pin-recovered`, `unlock`, `offline`, `online`) |
 | `wda-bridge [--port <port>]` | Expose WDA on `127.0.0.1` (default port 8100). Send `Authorization: Bearer` with the token from the mode-0600 file (the command prints the path, not the token). Stop it when done |
 | `credentials discard-legacy [--yes]` | List leftover plaintext credential copies. `--yes` deletes only `*.legacy-plaintext` files and does not print their contents |
+| `keyring-check` | Create, read, and revoke an ephemeral synthetic kernel key. No Apple login, USB, or stored secret. Exits non-zero if sealing cannot work |
 
 The `debug` subcommand for diagnostics isn't compiled by default; see the [contributing guide](https://github.com/Derrors/iphone-control/blob/main/CONTRIBUTING.md#testing-on-a-real-phone).
 

@@ -138,6 +138,15 @@ impl Daemon {
             }
         }
 
+        out.push("== 密钥环".into());
+        let keyring = ictl_sign::keyring_preflight();
+        if keyring.ok {
+            out.push(format!("✅ {}", keyring.summary));
+        } else {
+            out.push(format!("❌ {}", keyring.summary));
+            fails += 1;
+        }
+
         out.push("== 附加功能".into());
         if self.cfg.notify.any() {
             out.push("✅ 通知已配置".into());

@@ -28,7 +28,7 @@ The data directory is `./data` next to `compose.yaml` for the container (root-ow
 - The control socket is a Unix socket with mode 0600, not TCP. The daemon also checks the peer uid: only its own user, or root, is accepted.
 - The container is not `privileged` and sets `no-new-privileges`. It is only allowed USB character devices (major 189). Compose does **not** use host networking unless you opt in. The tunnel to the phone uses a user-space TCP stack.
 - Passwords and verification codes are read only after the terminal echo is turned off. If that fails, the program stops and does not read the secret.
-- New session tokens and signing keys are sealed before they touch the data directory. If the kernel keyring cannot hold the key, login refuses to save them instead of writing plaintext.
+- New session tokens and signing keys are sealed before they touch the data directory. If the kernel keyring cannot hold the key, login refuses to save them instead of writing plaintext. `iphone-control keyring-check` and `doctor` try an ephemeral synthetic key (create, read, revoke) before any Apple login. A failed check stops login before the Apple ID password is sent, and before it is even prompted on the CLI.
 - Auto-unlock is off by default. When enabled, it stops for good after a single wrong attempt (it writes a stop marker, `logs/UNLOCK-DISABLED`, before entering the second digit) and sends a notification; it never retries a passcode that might be wrong. The marker is global: a failure on one device stops auto-unlock on all of them until you run `unlock-reset`. It does not work before the first unlock after a reboot (BFU) — that always needs a person.
 - Dependencies are pinned to exact versions, `Cargo.lock` is committed, base images are pinned by digest, and the WebDriverAgent download is checked against a sha256. CI runs gitleaks on every push.
 
@@ -41,6 +41,23 @@ The data directory is `./data` next to `compose.yaml` for the container (root-ow
 - **Auto-unlock is memory-only, not safe against the same user.** The passcode is not written to disk anymore. Root and the same user can still read the daemon's memory or talk to the control socket while it runs. The passcode is also what protects the phone's data. Prefer leaving Auto-Lock off on a phone dedicated to automation. A daemon restart clears it.
 - **Agents act with your hands.** An agent with these tools can send messages, make purchases and change settings. The MCP server tells agents to ask before paying, deleting, sending messages or changing account or privacy settings, but that is an instruction, not an enforcement mechanism.
 - **Back up the data directory securely**, and never commit it. `.gitignore` and `.dockerignore` exclude `data/`, `.env` and key material. A backup of `account/` without the kernel keyring key does not contain newly sealed tokens in the clear. Leftover `*.legacy-plaintext` files and old `secrets/passcode*` files **do**. They are not deleted automatically. Remove them yourself: `iphone-control credentials discard-legacy --yes` and `iphone-control passcode clear --all`.
+
+## Keyring preflight
+
+Docker's published default seccomp profile blocks `add_key` and `keyctl` because the kernel keyring is not namespaced ([Docker seccomp docs](https://docs.docker.com/engine/security/seccomp/)). That is the documented default, not a measurement of a particular engine. `keyring-check` is the runtime measurement. It does not log in, open USB, or write a credential.
+
+Run it on the host as your normal user, and once inside a one-shot container that does not start the daemon (the daemon would start a second usbmuxd). Do not add `seccomp=unconfined`, extra capabilities, or a plaintext fallback.
+
+```bash
+# Host, normal user. Does not start a daemon and does not open USB.
+iphone-control keyring-check
+
+# Already-built image, one-shot. No USB mount, no network, default seccomp.
+# Does not start usbmuxd. Replace the image name if yours is not iphone-control:local.
+docker run --rm --network none --entrypoint iphone-control iphone-control:local keyring-check
+```
+
+If the container reports `add_key` / `keyctl` as `Operation not permitted` and the host command succeeds, use the native unprivileged binary with the host's usbmuxd (`ICTL_MANAGE_USBMUXD` stays unset or `0`). Do not stop the host usbmuxd to make the container the USB owner just so login can run as root. A container that runs as root and is allowed to use the keyring would put the sealing key in host UID 0's keyring. The native user process keeps it in that user's keyring.
 
 ## Remaining trust
 
